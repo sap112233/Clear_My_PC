@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import updater
 import autostart
 import notify
 import shutil
@@ -411,6 +412,26 @@ class Main(ctk.CTk):
 
         self.list = ctk.CTkScrollableFrame(self, label_text="Предлагаемые действия")
         self.list.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        self.after(1500, self.schedule_update_check)
+
+    def schedule_update_check(self):
+        today = datetime.now().date().isoformat()
+        if self.cfg.get("last_update_check") == today:
+            return
+        threading.Thread(target=self._update_check, daemon=True).start()
+
+    def _update_check(self):
+        rel = updater.check_update()
+        self.cfg["last_update_check"] = datetime.now().date().isoformat()
+        utils.save_json(config.CONFIG_PATH, self.cfg)
+        if rel:
+            self.after(0, lambda: self._show_update(rel))
+
+    def _show_update(self, rel):
+        notify.notify(f"Доступная новая версия: {rel['tag']}")
+        if messagebox.askyesno("Обновление",
+                               f"Вышла версия {rel['tag']}.\nОткрыть страницу загрузки?"):
+            updater.open_release(rel["url"])
 
     # ---------- скан и предпросмотр ----------
     def scan(self):

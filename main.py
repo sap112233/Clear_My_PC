@@ -53,7 +53,6 @@ def watch(history: list) -> None:
     obs.join()
     utils.save_json(config.HISTORY_PATH, history)
 
-
 def clean_screenshots(history: list) -> None:
     found = shots.collect()
     if not found:
