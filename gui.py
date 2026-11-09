@@ -494,13 +494,13 @@ class Main(ctk.CTk):
             self.observer = None
             self.status.configure(text="Мониторинг выключен.")
 
-        def toggle_autostart(self):
-            if self.auto.get():
-                autostart.enable()
-                self.status.configure(text="Автозапуск включён.")
-            else:
-                autostart.disable()
-                self.status.configure(text="Автозапуск выключен.")
+    def toggle_autostart(self):
+        if self.auto.get():
+            autostart.enable()
+            self.status.configure(text="Автозапуск включён.")
+        else:
+            autostart.disable()
+            self.status.configure(text="Автозапуск выключен.")
 
     # ---------- категории и справка ----------
     def edit_categories(self):
