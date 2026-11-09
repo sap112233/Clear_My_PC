@@ -1,4 +1,3 @@
-```markdown
 # DesktopKeeper
 
 Automatic desktop organizer for macOS and Windows that keeps your workspace clean without manual effort.
@@ -138,4 +137,3 @@ MIT License - see [LICENSE](LICENSE) file for details.
 **Status**: 🚧 Early development — first public release. Feedback appreciated!
 
 **Author**: [@sap112233](https://github.com/sap112233)
-```
