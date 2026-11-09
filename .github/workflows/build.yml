@@ -3,7 +3,11 @@ name: Build DesktopKeeper
 on:
   push:
     branches: [main, master]
-  workflow_dispatch:  # Ручной запуск
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
 
 jobs:
   build-windows:
