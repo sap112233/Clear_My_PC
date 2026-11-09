@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Локальные данные приложения
+*.json
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# PyInstaller
+*.spec
