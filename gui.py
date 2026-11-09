@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import autostart
+import notify
 import shutil
 import threading
 import uuid
@@ -394,6 +396,11 @@ class Main(ctk.CTk):
         self.mon = ctk.CTkSwitch(mid, text="Мониторинг скринов", command=self.toggle_watch)
         self.mon.pack(side="left")
         ToolTip(self.mon, "Новые скриншоты переименовываются и убираются сразу после создания")
+        self.auto = ctk.CTkSwitch(mid, text="Автозапуск", command=self.toggle_autostart)
+        self.auto.pack(side="left", padx=12)
+        if autostart.is_enabled():
+            self.auto.select()
+        ToolTip(self.auto, "Запускать DesktopKeeper при входе в систему")
         ctk.CTkButton(mid, text="Категории", width=100, fg_color="#3a3a3a",
                       command=self.edit_categories).pack(side="right", padx=4)
         ctk.CTkButton(mid, text="Справка", width=90, fg_color="#3a3a3a",
@@ -440,6 +447,7 @@ class Main(ctk.CTk):
             w.destroy()
         self.btn_apply.configure(state="disabled", text="Применить выбранные (0)")
         self.status.configure(text=f"Готово: выполнено {done}.")
+        notify.notify(f"Уборка завершена: выполнено действий — {done}")
 
     def undo(self):
         n = undo_last(self.history)
@@ -464,6 +472,14 @@ class Main(ctk.CTk):
             self.observer.stop()
             self.observer = None
             self.status.configure(text="Мониторинг выключен.")
+
+        def toggle_autostart(self):
+            if self.auto.get():
+                autostart.enable()
+                self.status.configure(text="Автозапуск включён.")
+            else:
+                autostart.disable()
+                self.status.configure(text="Автозапуск выключен.")
 
     # ---------- категории и справка ----------
     def edit_categories(self):
