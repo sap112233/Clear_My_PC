@@ -67,12 +67,17 @@ jobs:
           --hidden-import=updater \
           --hidden-import=version \
           gui.py
+
+    - name: Package executable
+      run: |
+        chmod +x dist/DesktopKeeper
+        tar -czf DesktopKeeper-macOS.tar.gz -C dist DesktopKeeper
     
     - name: Upload macOS artifact
       uses: actions/upload-artifact@v4
       with:
         name: DesktopKeeper-macOS
-        path: dist/DesktopKeeper
+        path: DesktopKeeper-macOS.tar.gz
 
   create-release:
     needs: [build-windows, build-macos]
@@ -100,7 +105,7 @@ jobs:
       with:
         files: |
           DesktopKeeper.exe
-          DesktopKeeper
+          DesktopKeeper-macOS.tar.gz
         tag_name: v${{ steps.ver.outputs.version }}
         name: DesktopKeeper v${{ steps.ver.outputs.version }}
         draft: false
