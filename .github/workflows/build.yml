@@ -27,20 +27,7 @@ jobs:
         pip install -r requirements.txt
     
     - name: Build with PyInstaller
-      run: |
-        pyinstaller --onefile --windowed --name DesktopKeeper \
-          --hidden-import=config \
-          --hidden-import=utils \
-          --hidden-import=platform_tools \
-          --hidden-import=screenshot_handler \
-          --hidden-import=app_handler \
-          --hidden-import=file_sorter \
-          --hidden-import=categories \
-          --hidden-import=autostart \
-          --hidden-import=notify \
-          --hidden-import=updater \
-          --hidden-import=version \
-          gui.py
+      run: pyinstaller --onefile --windowed --name DesktopKeeper --hidden-import=config --hidden-import=utils --hidden-import=platform_tools --hidden-import=screenshot_handler --hidden-import=app_handler --hidden-import=file_sorter --hidden-import=categories --hidden-import=autostart --hidden-import=notify --hidden-import=updater --hidden-import=version gui.py
     
     - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
