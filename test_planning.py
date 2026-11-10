@@ -122,6 +122,7 @@ class PlanningTests(unittest.TestCase):
                     gui.apps, "get_bundle_id", return_value="com.example.editor"
                 ),
                 mock.patch.object(gui.pt, "IS_MAC", False),
+                mock.patch.object(gui.pt, "IS_LINUX", False),
             )
             with ExitStack() as stack:
                 for patcher in patches:
@@ -173,6 +174,7 @@ class PlanningTests(unittest.TestCase):
                     gui.apps, "get_bundle_id", return_value="com.example.editor"
                 ),
                 mock.patch.object(gui.pt, "IS_MAC", False),
+                mock.patch.object(gui.pt, "IS_LINUX", False),
             )
             with ExitStack() as stack:
                 for patcher in patches:

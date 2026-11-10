@@ -108,7 +108,8 @@ class SafetyTests(unittest.TestCase):
                 content = entry.read_text(encoding="utf-8")
                 self.assertIn('Exec="/opt/Desktop Keeper/python" "/app path/gui.py"', content)
                 self.assertIn("X-DesktopKeeper-Autostart=true", content)
-                self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
+                if os.name == "posix":
+                    self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
 
                 autostart.disable()
                 self.assertFalse(entry.exists())
@@ -307,7 +308,8 @@ class SafetyTests(unittest.TestCase):
                 created = platform_tools.create_shortcut(source, destination)
                 self.assertEqual(created, destination)
                 self.assertEqual(destination.read_text(encoding="utf-8"), content)
-                self.assertTrue(destination.stat().st_mode & 0o100)
+                if os.name == "posix":
+                    self.assertTrue(destination.stat().st_mode & 0o100)
                 with self.assertRaises(FileExistsError):
                     platform_tools.create_shortcut(source, destination)
 
@@ -619,16 +621,16 @@ class SafetyTests(unittest.TestCase):
             destination = root / "shortcuts" / "link; Write-Output injected"
 
             with mock.patch.object(platform_tools, "IS_MAC", True), mock.patch.object(
-                platform_tools.subprocess, "run"
-            ) as run:
+                platform_tools, "IS_LINUX", False
+            ), mock.patch.object(platform_tools.subprocess, "run") as run:
                 platform_tools.create_shortcut(target, destination)
                 command = run.call_args.args[0]
                 self.assertNotIn(str(target), command[2])
                 self.assertEqual(command[-2:], [str(target), str(destination.parent)])
 
             with mock.patch.object(platform_tools, "IS_MAC", False), mock.patch.object(
-                platform_tools.subprocess, "run"
-            ) as run:
+                platform_tools, "IS_LINUX", False
+            ), mock.patch.object(platform_tools.subprocess, "run") as run:
                 platform_tools.create_shortcut(target, destination)
                 command = run.call_args.args[0]
                 environment = run.call_args.kwargs["env"]

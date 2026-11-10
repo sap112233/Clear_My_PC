@@ -131,8 +131,9 @@ class OrganizationTests(unittest.TestCase):
     def test_excluded_folder_paths_must_be_absolute_and_not_drive_roots(self):
         with self.assertRaisesRegex(ValueError, "абсолютным"):
             organization.validate_excluded_folders(["relative/path"])
+        drive_root = Path(Path.cwd().anchor)
         with self.assertRaisesRegex(ValueError, "корень диска"):
-            organization.validate_excluded_folders([str(Path("/"))])
+            organization.validate_excluded_folders([str(drive_root)])
 
     def test_custom_destinations_must_be_distinct_and_inside_home(self):
         with tempfile.TemporaryDirectory() as temp_dir:
