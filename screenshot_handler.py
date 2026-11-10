@@ -10,6 +10,7 @@ from utils import sanitize, logged_move
 def is_screenshot(p: Path) -> bool:
     return (
         p.is_file()
+        and not p.is_symlink()
         and p.suffix.lower() in config.SCREENSHOT_EXTS
         and p.name.startswith(config.SCREENSHOT_PREFIXES)
     )

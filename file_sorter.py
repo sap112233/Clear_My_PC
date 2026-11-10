@@ -5,7 +5,7 @@ from pathlib import Path
 
 import config
 import screenshot_handler as shots
-from utils import logged_move, save_json
+from utils import logged_move, save_json, unique_dst
 
 TYPE_MAP = {
     "Изображения": {".png", ".jpg", ".jpeg", ".gif", ".heic", ".webp", ".svg", ".tiff", ".bmp"},
@@ -32,7 +32,7 @@ def collect() -> list[tuple[Path, str]]:
     if not config.DESKTOP.is_dir():
         return out
     for f in sorted(config.DESKTOP.iterdir()):
-        if not f.is_file() or f.name in SKIP_NAMES:
+        if f.is_symlink() or not f.is_file() or f.name in SKIP_NAMES:
             continue
         if shots.is_screenshot(f):
             continue
@@ -46,15 +46,23 @@ def run(history: list) -> None:
         print("На рабочем столе нет файлов для сортировки.")
         return
 
-    print(f"\nФайлов к сортировке: {len(items)}:")
-    for f, t in items:
-        print(f"  {f.name}  →  Файлы/{t}/")
+    planned = []
+    reserved = set()
+    for source, type_name in items:
+        destination = unique_dst(
+            config.FILES_ROOT / type_name / source.name, reserved
+        )
+        planned.append((source, type_name, destination))
+
+    print(f"\nФайлов к сортировке: {len(planned)}:")
+    for source, _, destination in planned:
+        print(f"  {source}  →  {destination}")
 
     if input("\nПрименить? [y/N] ").strip().lower() != "y":
         print("Отменено.")
         return
 
-    for f, t in items:
-        logged_move(f, config.FILES_ROOT / t / f.name, history)
+    for source, _, destination in planned:
+        logged_move(source, destination, history, allow_unique=False)
     save_json(config.HISTORY_PATH, history)
     print("Готово.")

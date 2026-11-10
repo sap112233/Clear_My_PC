@@ -10,7 +10,7 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 ### 🖼️ Smart Screenshot Management
 - Automatically renames screenshots with meaningful names (application name + window title + timestamp)
 - Moves screenshots to a dedicated folder with clean naming convention
-- Real-time monitoring: new screenshots are processed instantly
+- Real-time monitoring: each new screenshot is previewed and requires approval before moving
 
 ### 📁 Intelligent File Organization
 - Sorts files by type into categorized folders (Images, Videos, Documents, Code, Archives, etc.)
@@ -23,9 +23,9 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 - Remembers your preferences for future use
 
 ### 🗑️ Automatic Cleanup
-- Removes installers (.dmg, .pkg, .exe, .msi) after successful installation
-- Sends files to system Trash (safe and reversible)
-- Undo functionality: restore files from the last cleanup operation
+- Finds installers (.dmg, .pkg, .exe, .msi) after successful installation
+- Moves installers to a private, reversible quarantine instead of deleting them
+- Selectively rolls back individual actions or all reversible recorded changes
 
 ### 🖥️ Cross-Platform
 - **macOS**: Full integration with Finder aliases, AppleScript automation, LaunchAgent for autostart
@@ -52,10 +52,10 @@ Download from [Releases](https://github.com/sap112233/Clear_My_PC/releases)
 ## Usage
 
 ### Main Interface
-- **Scan System**: Analyzes desktop, downloads, and installed applications
-- **Apply Selected**: Executes only checked actions with confirmation
-- **Undo Last**: Reverts files moved in the previous cleanup
-- **Monitoring**: Toggle real-time screenshot processing
+- **Scan System**: Opens a separate preview of proposed actions
+- **Allow Selected**: Executes only checked actions after confirmation
+- **Rollback Actions**: Restores selected files or all reversible recorded changes; generated shortcuts are archived, not permanently deleted
+- **Monitoring**: Preview and approve each new screenshot before it is moved
 - **Autostart**: Launch DesktopKeeper on system boot
 
 ### Categories
@@ -73,6 +73,11 @@ You can customize:
 - Enabled features
 - File type mappings
 - Application categories
+
+The local history, configuration, and quarantine are stored in `~/.desktop-keeper`
+with restricted permissions on supported systems. Corrupt history files are reported
+instead of silently replaced. CLI operations display their proposed changes and ask
+for confirmation before applying them.
 
 ## Updates
 

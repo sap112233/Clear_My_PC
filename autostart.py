@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import plistlib
+import tempfile
 from pathlib import Path
 
 import platform_tools as pt
+from utils import safe_child_path
 
 LABEL = "com.desktopkeeper"
-PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+PLIST = safe_child_path(Path.home(), "Library", "LaunchAgents", f"{LABEL}.plist")
 
 
 def launch_command() -> list[str]:
@@ -33,24 +36,34 @@ def is_enabled() -> bool:
 def enable() -> None:
     cmd = launch_command()
     if pt.IS_MAC:
-        args = "".join(f"    <string>{a}</string>\n" for a in cmd)
+        if PLIST.is_symlink():
+            raise ValueError(f"Файл автозапуска не должен быть символической ссылкой: {PLIST}")
         PLIST.parent.mkdir(parents=True, exist_ok=True)
-        PLIST.write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>{LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-{args}  </array>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-''', encoding="utf-8")
-        subprocess.run(["launchctl", "load", "-w", str(PLIST)], check=False)
+        document = plistlib.dumps({
+            "Label": LABEL,
+            "ProgramArguments": cmd,
+            "RunAtLoad": True,
+        }, fmt=plistlib.FMT_XML)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=PLIST.parent, prefix=f".{LABEL}.", suffix=".tmp", delete=False
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(document)
+                temp_file.flush()
+            temp_path.chmod(0o600)
+            PLIST.parent.mkdir(parents=True, exist_ok=True)
+            if PLIST.is_symlink():
+                raise ValueError(f"Файл автозапуска не должен быть символической ссылкой: {PLIST}")
+            temp_path.replace(PLIST)
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+        subprocess.run(["launchctl", "load", "-w", str(PLIST)], check=True)
     else:
         import winreg
-        value = f'"{cmd[0]}"' if " " in cmd[0] else cmd[0]
+        value = subprocess.list2cmdline(cmd)
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                             r"Software\Microsoft\Windows\CurrentVersion\Run",
                             0, winreg.KEY_SET_VALUE) as k:
@@ -59,8 +72,11 @@ def enable() -> None:
 
 def disable() -> None:
     if pt.IS_MAC:
-        subprocess.run(["launchctl", "unload", str(PLIST)], check=False)
-        PLIST.unlink(missing_ok=True)
+        if PLIST.is_symlink():
+            raise ValueError(f"Файл автозапуска не должен быть символической ссылкой: {PLIST}")
+        if PLIST.is_file():
+            subprocess.run(["launchctl", "unload", str(PLIST)], check=True)
+            PLIST.unlink()
     else:
         import winreg
         try:

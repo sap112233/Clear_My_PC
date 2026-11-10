@@ -2,6 +2,7 @@
 macOS и Windows без сторонних библиотек."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,34 +60,66 @@ def app_dirs() -> list[Path]:
 
 def create_shortcut(target: Path, dst_no_ext: Path) -> Path:
     """macOS: алиас Finder. Windows: .lnk (или копия .lnk)."""
+    if not (target.exists() or target.is_symlink()):
+        raise FileNotFoundError(target)
     if IS_MAC:
-        script = f'''
+        if dst_no_ext.exists() or dst_no_ext.is_symlink():
+            raise FileExistsError(dst_no_ext)
+        script = '''
+        on run argv
+            set targetPath to item 1 of argv
+            set destinationPath to item 2 of argv
         tell application "Finder"
-            make alias file to (POSIX file "{target}") at (POSIX file "{dst_no_ext.parent}")
+            make alias file to (POSIX file targetPath) at (POSIX file destinationPath)
         end tell
+        end run
         '''
-        subprocess.run(["osascript", "-e", script], check=True, timeout=10)
+        dst_no_ext.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["osascript", "-e", script, str(target), str(dst_no_ext.parent)],
+            check=True,
+            timeout=10,
+        )
         return dst_no_ext
     dst = dst_no_ext.with_suffix(".lnk")
+    if dst.exists() or dst.is_symlink():
+        raise FileExistsError(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
     if target.suffix.lower() == ".lnk":
         import shutil
         shutil.copy2(target, dst)
         return dst
     ps = (
+        "$target = $env:DESKTOPKEEPER_TARGET; "
+        "$destination = $env:DESKTOPKEEPER_DESTINATION; "
         "$ws = New-Object -ComObject WScript.Shell; "
-        f"$sc = $ws.CreateShortcut('{dst}'); "
-        f"$sc.TargetPath = '{target}'; $sc.Save()"
+        "$sc = $ws.CreateShortcut($destination); "
+        "$sc.TargetPath = $target; $sc.Save()"
     )
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, timeout=15)
+    env = os.environ.copy()
+    env["DESKTOPKEEPER_TARGET"] = str(target)
+    env["DESKTOPKEEPER_DESTINATION"] = str(dst)
+    subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        env=env,
+        check=True,
+        timeout=15,
+    )
     return dst
 
 
 # ---------- Корзина ----------
 
 def send_to_trash(path: Path) -> bool:
+    if not (path.exists() or path.is_symlink()):
+        raise FileNotFoundError(path)
     if IS_MAC:
-        script = f'tell application "Finder" to delete (POSIX file "{path}")'
-        subprocess.run(["osascript", "-e", script], check=True, timeout=10)
+        script = '''
+        on run argv
+            tell application "Finder" to delete (POSIX file (item 1 of argv))
+        end run
+        '''
+        subprocess.run(["osascript", "-e", script, str(path)], check=True, timeout=10)
         return True
     import ctypes
     from ctypes import byref, wintypes
@@ -103,7 +136,8 @@ def send_to_trash(path: Path) -> bool:
     op.wFunc = 3  # FO_DELETE
     op.pFrom = str(path) + "\0"
     op.fFlags = 0x40 | 0x10 | 0x04  # в корзину, без подтверждений, тихо
-    return ctypes.windll.shell32.SHFileOperationW(byref(op)) == 0
+    result = ctypes.windll.shell32.SHFileOperationW(byref(op))
+    return result == 0 and not op.fAnyOperationsAborted
 
 
 # ---------- Активное окно (для имён скриншотов) ----------

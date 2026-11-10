@@ -4,7 +4,7 @@
   python3 main.py --set-capture       # разово: системные скрины сразу в 'мусор'
   python3 main.py --scan-apps         # предпросмотр раскладки приложений
   python3 main.py --process-apps      # создать алиасы приложений
-  python3 main.py --clean-installers  # установщики в Корзину
+  python3 main.py --clean-installers  # предпросмотр и перенос установщиков в архив
   python3 main.py --sort-files        # сортировка файлов стола по типам
   python3 main.py --add-category ИМЯ  # создать новую категорию внутри Apps
 """
@@ -33,7 +33,14 @@ class ShotWatcher(FileSystemEventHandler):
             return
         if not utils.wait_stable(p):
             return
-        dst = shots.process(p, self.history, live=True)
+        destination = utils.unique_dst(
+            config.MUSOR / shots.build_name(p, "", "")
+        )
+        print(f"\nПредпросмотр нового скриншота:\n  {p} → {destination}")
+        if input("Разрешить перемещение? [y/N] ").strip().lower() != "y":
+            print("Оставляю файл на месте.")
+            return
+        dst = utils.logged_move(p, destination, self.history, allow_unique=False)
         utils.save_json(config.HISTORY_PATH, self.history)
         print(f"[shot] {p.name}  →  {dst.name}")
 
@@ -58,14 +65,21 @@ def clean_screenshots(history: list) -> None:
     if not found:
         print("Рабочий стол чист: скриншотов не найдено.")
         return
-    print(f"\nНайдено скриншотов: {len(found)}. План:")
-    for f in found:
-        print(f"  {f.parent.name}/{f.name}  →  мусор/{shots.build_name(f, '', '')}")
+    planned = []
+    reserved = set()
+    for source in found:
+        destination = utils.unique_dst(
+            config.MUSOR / shots.build_name(source, "", ""), reserved
+        )
+        planned.append((source, destination))
+    print(f"\nНайдено скриншотов: {len(planned)}. План:")
+    for source, destination in planned:
+        print(f"  {source}  →  {destination}")
     if input("\nПрименить? [y/N] ").strip().lower() != "y":
         print("Отменено.")
         return
-    for f in found:
-        shots.process(f, history)
+    for source, destination in planned:
+        utils.logged_move(source, destination, history, allow_unique=False)
     utils.save_json(config.HISTORY_PATH, history)
     print("Готово.")
 
@@ -82,19 +96,27 @@ def main() -> None:
     args = ap.parse_args()
 
     history = utils.load_json(config.HISTORY_PATH, [])
+    if not isinstance(history, list) or any(
+        not isinstance(entry, dict) for entry in history
+    ):
+        raise ValueError("История действий должна быть списком JSON-объектов.")
 
     if args.set_capture:
-        shots.set_system_capture_location()
+        print(f"Место сохранения скриншотов будет изменено на: {config.MUSOR}")
+        if input("Применить это системное изменение? [y/N] ").strip().lower() == "y":
+            shots.set_system_capture_location()
+        else:
+            print("Отменено.")
     elif args.watch:
         watch(history)
     elif args.scan_apps:
         apps.process_applications(history, dry_run=True)
     elif args.process_apps:
-        apps.process_applications(history, dry_run=False)
-        utils.save_json(config.HISTORY_PATH, history)
+        if apps.process_applications(history, dry_run=False):
+            utils.save_json(config.HISTORY_PATH, history)
     elif args.clean_installers:
-        apps.process_installers(history)
-        utils.save_json(config.HISTORY_PATH, history)
+        if apps.process_installers(history):
+            utils.save_json(config.HISTORY_PATH, history)
     elif args.sort_files:
         sorter.run(history)
     elif args.add_category:
