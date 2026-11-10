@@ -4,6 +4,9 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 
 ![Build Status](https://github.com/sap112233/Clear_My_PC/actions/workflows/build.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
+[![Stars](https://img.shields.io/github/stars/sap112233/Clear_My_PC?style=social)](https://github.com/sap112233/Clear_My_PC)
+[![Forks](https://img.shields.io/github/forks/sap112233/Clear_My_PC?style=social)](https://github.com/sap112233/Clear_My_PC)
+[![Issues](https://img.shields.io/github/issues/sap112233/Clear_My_PC)](https://github.com/sap112233/Clear_My_PC/issues)
 
 ## Features
 
