@@ -249,9 +249,9 @@ class SafetyTests(unittest.TestCase):
     def test_shortcut_paths_are_passed_as_data_not_script_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            target = root / 'app"; injected'
+            target = root / "app; Write-Output injected"
             target.write_text("app", encoding="utf-8")
-            destination = root / "shortcuts" / 'link"; injected'
+            destination = root / "shortcuts" / "link; Write-Output injected"
 
             with mock.patch.object(platform_tools, "IS_MAC", True), mock.patch.object(
                 platform_tools.subprocess, "run"
