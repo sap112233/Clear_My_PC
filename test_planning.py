@@ -50,9 +50,35 @@ class PlanningTests(unittest.TestCase):
                 cli_settings = main.load_user_settings()
 
             self.assertIn("Графика/дизайн", gui_settings["categories"])
+            self.assertEqual(gui_settings["theme"], "light")
             self.assertIn("Другое", gui_settings["categories"])
             self.assertEqual(cli_settings["layout_mode"], "automatic")
             self.assertEqual(gui.config.APPS_ROOT, (desktop / "Apps").resolve())
+
+    def test_gui_restores_saved_theme_and_rejects_unknown_theme(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            desktop = home / "Desktop"
+            desktop.mkdir()
+            settings_path = home / "settings.json"
+            settings_path.write_text('{"theme": "dark"}', encoding="utf-8")
+            patches = (
+                mock.patch.object(gui.config, "HOME", home),
+                mock.patch.object(gui.config, "DESKTOP", desktop),
+                mock.patch.object(gui.config, "CONFIG_PATH", settings_path),
+            )
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                set_mode = stack.enter_context(
+                    mock.patch.object(gui.ctk, "set_appearance_mode")
+                )
+                self.assertEqual(gui.load_cfg()["theme"], "dark")
+                set_mode.assert_called_once_with("dark")
+
+                settings_path.write_text('{"theme": "sepia"}', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "Тема должна быть"):
+                    gui.load_cfg()
 
     def test_preview_uses_custom_file_types_and_selected_app_category(self):
         with tempfile.TemporaryDirectory() as temp_dir:

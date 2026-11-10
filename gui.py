@@ -29,12 +29,23 @@ import utils
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
-ACCENT = "#6036D9"
-ACCENT_HOVER = "#5128C7"
-TEXT = "#171923"
-MUTED = "#71809A"
-SURFACE = "#FFFFFF"
-BACKGROUND = "#F2F3F7"
+ACCENT = ("#6036D9", "#805CF0")
+ACCENT_HOVER = ("#5128C7", "#6F49DF")
+TEXT = ("#171923", "#F2F1F7")
+MUTED = ("#71809A", "#A5ADC0")
+SURFACE = ("#FFFFFF", "#22232A")
+BACKGROUND = ("#F2F3F7", "#18191F")
+SIDEBAR = ("#F8F8FB", "#1D1E25")
+BORDER = ("#E6E5EA", "#34353F")
+SEPARATOR = ("#ECECF0", "#34353F")
+NAV_HOVER = ("#ECEAF3", "#2B2C35")
+NAV_ACTIVE = ("#E5DDF8", "#342A4E")
+BADGE_BG = ("#E9E1FA", "#382D53")
+ICON_BG = ("#F0F0F3", "#30313A")
+APP_MENU_BG = ("#F0EDF8", "#342A4E")
+APP_MENU_BUTTON = ("#E5DDF8", "#443363")
+APP_MENU_HOVER = ("#DAD0F2", "#55417D")
+FOOTER_HOVER = ("#E8E8ED", "#2B2C35")
 
 DEFAULT_CATEGORIES = {
     "Браузеры": ["Chrome", "Firefox", "Safari", "Brave", "Arc", "Tor Browser"],
@@ -61,6 +72,10 @@ def load_cfg() -> dict:
     cfg = utils.load_json(config.CONFIG_PATH, {})
     if not isinstance(cfg, dict):
         raise ValueError("Файл настроек должен содержать JSON-объект.")
+    cfg.setdefault("theme", "light")
+    if cfg["theme"] not in {"light", "dark"}:
+        raise ValueError("Тема должна быть «light» или «dark».")
+    ctk.set_appearance_mode(cfg["theme"])
     cfg.setdefault("categories", dict(DEFAULT_CATEGORIES))
     default_features = {
         "screenshots": True,
@@ -909,7 +924,7 @@ class Main(ctk.CTk):
         self.minsize(860, 600)
         self.configure(fg_color=BACKGROUND)
 
-        sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color="#F8F8FB")
+        sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=SIDEBAR)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
@@ -935,9 +950,17 @@ class Main(ctk.CTk):
         self._add_nav(sidebar, "help", "?  Справка", self.show_help)
         self._set_active_nav("scan")
 
-        ctk.CTkFrame(sidebar, height=1, fg_color="#E2E2E8").pack(
+        ctk.CTkFrame(sidebar, height=1, fg_color=BORDER).pack(
             side="bottom", fill="x", padx=18, pady=(0, 14)
         )
+        self.theme = ctk.CTkSwitch(
+            sidebar, text="Тёмная тема", command=self.toggle_theme,
+            progress_color=ACCENT, button_color=ACCENT,
+            button_hover_color=ACCENT_HOVER,
+        )
+        self.theme.pack(side="bottom", anchor="w", padx=22, pady=(0, 16))
+        if self.cfg["theme"] == "dark":
+            self.theme.select()
         self.auto = ctk.CTkSwitch(
             sidebar, text="Автозапуск", command=self.toggle_autostart,
             progress_color=ACCENT, button_color=ACCENT,
@@ -994,7 +1017,7 @@ class Main(ctk.CTk):
         ):
             card = ctk.CTkFrame(
                 stats, fg_color=SURFACE, corner_radius=18,
-                border_width=1, border_color="#E6E5EA",
+                border_width=1, border_color=BORDER,
             )
             card.pack(side="left", fill="x", expand=True, padx=(0, 14))
             ctk.CTkLabel(
@@ -1028,7 +1051,7 @@ class Main(ctk.CTk):
         self.btn_apply.pack(side="left")
         self.btn_undo = ctk.CTkButton(
             footer, text="Откатить последнее", height=44,
-            fg_color="transparent", hover_color="#E8E8ED",
+            fg_color="transparent", hover_color=FOOTER_HOVER,
             text_color=MUTED, font=("", 13, "bold"), command=self.undo,
         )
         self.btn_undo.pack(side="left", padx=(18, 0))
@@ -1043,7 +1066,7 @@ class Main(ctk.CTk):
 
         button = ctk.CTkButton(
             parent, text=text, height=38, anchor="w", corner_radius=11,
-            fg_color="transparent", hover_color="#ECEAF3", text_color=MUTED,
+            fg_color="transparent", hover_color=NAV_HOVER, text_color=MUTED,
             font=("", 13, "bold"), command=navigate,
         )
         button.pack(fill="x", padx=18, pady=3)
@@ -1053,7 +1076,7 @@ class Main(ctk.CTk):
         for key, button in self.nav_buttons.items():
             active = key == selected
             button.configure(
-                fg_color="#E5DDF8" if active else "transparent",
+                fg_color=NAV_ACTIVE if active else "transparent",
                 text_color=ACCENT if active else MUTED,
             )
 
@@ -1108,7 +1131,7 @@ class Main(ctk.CTk):
                 continue
             card = ctk.CTkFrame(
                 self.list, fg_color=SURFACE, corner_radius=18,
-                border_width=1, border_color="#E6E5EA",
+                border_width=1, border_color=BORDER,
             )
             card.pack(fill="x", pady=(0, 12))
             heading = ctk.CTkFrame(card, fg_color="transparent")
@@ -1117,7 +1140,7 @@ class Main(ctk.CTk):
                 heading, text=title, text_color=TEXT, font=("", 13, "bold"),
             ).pack(side="left")
             badge = ctk.CTkLabel(
-                heading, text="", corner_radius=10, fg_color="#E9E1FA",
+                heading, text="", corner_radius=10, fg_color=BADGE_BG,
                 text_color=ACCENT, font=("", 10, "bold"), padx=10, pady=2,
             )
             badge.pack(side="right")
@@ -1127,7 +1150,7 @@ class Main(ctk.CTk):
                 )
                 row.pack(fill="x", padx=12)
                 if index:
-                    ctk.CTkFrame(row, height=1, fg_color="#ECECF0").pack(
+                    ctk.CTkFrame(row, height=1, fg_color=SEPARATOR).pack(
                         fill="x", side="top",
                     )
                 line = ctk.CTkFrame(row, fg_color="transparent")
@@ -1140,7 +1163,7 @@ class Main(ctk.CTk):
                 ).pack(side="left", padx=(0, 10))
                 ctk.CTkLabel(
                     line, text=icon, width=28, height=28, corner_radius=7,
-                    fg_color="#F0F0F3", text_color="#737B8C",
+                    fg_color=ICON_BG, text_color=MUTED,
                     font=("", 14, "bold"),
                 ).pack(side="left", padx=(0, 12))
                 ctk.CTkLabel(
@@ -1151,8 +1174,8 @@ class Main(ctk.CTk):
                     ctk.CTkOptionMenu(
                         line, values=action["category_options"],
                         variable=ctk.StringVar(value=action["_category"]),
-                        width=135, height=28, fg_color="#F0EDF8",
-                        button_color="#E5DDF8", button_hover_color="#DAD0F2",
+                        width=135, height=28, fg_color=APP_MENU_BG,
+                        button_color=APP_MENU_BUTTON, button_hover_color=APP_MENU_HOVER,
                         text_color=ACCENT,
                         command=lambda value, selected=action: self.update_app_category(
                             selected, value
@@ -1203,6 +1226,22 @@ class Main(ctk.CTk):
 
     def settings_saved(self):
         self.status.configure(text="Настройки сохранены. Новые назначения будут показаны при следующем сканировании.")
+
+    def toggle_theme(self):
+        theme = "dark" if self.theme.get() else "light"
+        previous = self.cfg["theme"]
+        self.cfg["theme"] = theme
+        try:
+            utils.save_json(config.CONFIG_PATH, self.cfg)
+        except (OSError, TypeError, ValueError) as exc:
+            self.cfg["theme"] = previous
+            self.theme.select() if previous == "dark" else self.theme.deselect()
+            messagebox.showerror("Не удалось сохранить тему", str(exc), parent=self)
+            return
+        ctk.set_appearance_mode(theme)
+        self.status.configure(
+            text=f"Включена {'тёмная' if theme == 'dark' else 'светлая'} тема."
+        )
 
     def schedule_update_check(self):
         today = datetime.now().date().isoformat()

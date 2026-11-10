@@ -57,6 +57,7 @@ Download from [Releases](https://github.com/sap112233/Clear_My_PC/releases)
 ### Main Interface
 - **Scan System**: Shows proposed actions grouped by file type in the dashboard
 - **Apply**: Executes checked actions after confirmation
+- **Theme**: Switch between light and dark mode; your choice is saved
 - **Rollback Actions**: Restores selected files or all reversible recorded changes; generated shortcuts are archived, not permanently deleted
 - **Monitoring**: Preview and approve each new screenshot before it is moved
 - **Autostart**: Launch DesktopKeeper on system boot
