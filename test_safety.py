@@ -5,7 +5,12 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+import app_handler
+import autostart
+import file_sorter
+import notify
 import platform_tools
+import screenshot_handler
 import utils
 
 
@@ -19,6 +24,108 @@ def allowed_roots(root):
 
 
 class SafetyTests(unittest.TestCase):
+    def test_linux_notifications_use_notify_send_without_a_shell(self):
+        with mock.patch.object(notify.pt, "IS_LINUX", True), mock.patch.object(
+            notify.pt, "IS_MAC", False
+        ), mock.patch.object(notify.pt, "IS_WIN", False), mock.patch.object(
+            notify.subprocess, "run"
+        ) as run:
+            notify.notify("Сортировка завершена; «всё безопасно»")
+
+        run.assert_called_once_with(
+            [
+                "notify-send",
+                "--app-name=DesktopKeeper",
+                "DesktopKeeper",
+                "Сортировка завершена; «всё безопасно»",
+            ],
+            check=True,
+            timeout=10,
+        )
+
+    def test_linux_trash_uses_gio_and_propagates_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "file with spaces.txt"
+            path.write_text("data", encoding="utf-8")
+            with mock.patch.object(platform_tools, "IS_LINUX", True), mock.patch.object(
+                platform_tools, "IS_MAC", False
+            ), mock.patch.object(
+                platform_tools.subprocess, "run"
+            ) as run:
+                self.assertTrue(platform_tools.send_to_trash(path))
+
+            run.assert_called_once_with(
+                ["gio", "trash", "--", str(path)],
+                check=True,
+                timeout=30,
+            )
+            self.assertTrue(path.exists())
+
+            with mock.patch.object(platform_tools, "IS_LINUX", True), mock.patch.object(
+                platform_tools, "IS_MAC", False
+            ), mock.patch.object(
+                platform_tools.subprocess,
+                "run",
+                side_effect=FileNotFoundError("gio"),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    platform_tools.send_to_trash(path)
+            self.assertTrue(path.exists())
+
+    def test_linux_screenshot_location_rejects_unsupported_system_change(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "screenshots"
+            with mock.patch.object(platform_tools, "IS_LINUX", True), mock.patch.object(
+                platform_tools, "IS_MAC", False
+            ):
+                with self.assertRaisesRegex(NotImplementedError, "Linux"):
+                    platform_tools.set_screenshot_location(destination)
+            self.assertFalse(destination.exists())
+
+    def test_linux_notification_failure_is_reported_without_breaking_workflow(self):
+        with mock.patch.object(notify.pt, "IS_LINUX", True), mock.patch.object(
+            notify.pt, "IS_MAC", False
+        ), mock.patch.object(notify.pt, "IS_WIN", False), mock.patch.object(
+            notify.subprocess, "run", side_effect=FileNotFoundError("notify-send")
+        ), self.assertLogs("notify", level="WARNING") as logs:
+            notify.notify("Completed")
+
+        self.assertIn("notify-send", logs.output[0])
+
+    def test_linux_autostart_uses_private_xdg_entry_and_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            entry = Path(temp_dir) / "autostart" / "desktopkeeper.desktop"
+            command = ["/opt/Desktop Keeper/python", "/app path/gui.py"]
+            with mock.patch.object(autostart, "LINUX_AUTOSTART", entry), mock.patch.object(
+                autostart.pt, "IS_LINUX", True
+            ), mock.patch.object(autostart.pt, "IS_MAC", False), mock.patch.object(
+                autostart, "launch_command", return_value=command
+            ):
+                self.assertFalse(autostart.is_enabled())
+                autostart.enable()
+
+                self.assertTrue(autostart.is_enabled())
+                content = entry.read_text(encoding="utf-8")
+                self.assertIn('Exec="/opt/Desktop Keeper/python" "/app path/gui.py"', content)
+                self.assertIn("X-DesktopKeeper-Autostart=true", content)
+                self.assertEqual(entry.stat().st_mode & 0o777, 0o600)
+
+                autostart.disable()
+                self.assertFalse(entry.exists())
+
+    def test_linux_autostart_refuses_to_replace_or_remove_unknown_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            entry = Path(temp_dir) / "desktopkeeper.desktop"
+            entry.write_text("[Desktop Entry]\nName=Other App\n", encoding="utf-8")
+            with mock.patch.object(autostart, "LINUX_AUTOSTART", entry), mock.patch.object(
+                autostart.pt, "IS_LINUX", True
+            ), mock.patch.object(autostart.pt, "IS_MAC", False):
+                with self.assertRaises(FileExistsError):
+                    autostart.enable()
+                with self.assertRaises(ValueError):
+                    autostart.disable()
+            self.assertIn("Other App", entry.read_text(encoding="utf-8"))
+
     def test_selective_rollback_only_restores_selected_move(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -84,6 +191,239 @@ class SafetyTests(unittest.TestCase):
             saved = utils.load_json(history_path, [])
             self.assertEqual(saved[0]["status"], "complete")
             self.assertEqual(saved[0]["dst"], str(destination))
+
+    def test_move_rejects_excluded_destination_without_creating_it(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.txt"
+            protected = root / "Protected"
+            destination = protected / "Sorted" / "source.txt"
+            source.write_text("data", encoding="utf-8")
+
+            with mock.patch.object(config, "EXCLUDED_FOLDERS", [protected]):
+                with self.assertRaisesRegex(ValueError, "защищённую"):
+                    utils.logged_move(source, destination, [], allow_unique=False)
+
+            self.assertTrue(source.exists())
+            self.assertFalse(protected.exists())
+
+    def test_scanners_skip_excluded_desktop_and_downloads(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            desktop = root / "Desktop"
+            downloads = root / "Downloads"
+            desktop.mkdir()
+            downloads.mkdir()
+            (desktop / "photo.png").write_text("image", encoding="utf-8")
+            installer = downloads / f"setup{next(iter(platform_tools.INSTALLER_EXTS))}"
+            installer.write_text("installer", encoding="utf-8")
+
+            with mock.patch.object(config, "DESKTOP", desktop), mock.patch.object(
+                config, "DOWNLOADS", downloads
+            ), mock.patch.object(
+                config, "EXCLUDED_FOLDERS", [desktop, downloads]
+            ):
+                self.assertEqual(file_sorter.collect(), [])
+                self.assertEqual(app_handler.scan_downloads(), [])
+
+    def test_application_scanner_finds_nested_macos_apps_not_nested_bundle_helpers(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Applications"
+            group = root / "Creative Tools"
+            outer_app = group / "Editor.app"
+            helper_app = outer_app / "Contents" / "Helpers" / "Helper.app"
+            nested_app = group / "Support" / "Renderer.app"
+            helper_app.mkdir(parents=True)
+            nested_app.mkdir(parents=True)
+
+            with mock.patch.object(config, "APP_DIRS", [root]), mock.patch.object(
+                platform_tools, "IS_MAC", True
+            ):
+                found = app_handler.scan_applications()
+
+            self.assertEqual(set(found), {outer_app, nested_app})
+            self.assertNotIn(helper_app, found)
+
+    def test_application_scanner_finds_nested_windows_start_menu_shortcuts(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Programs"
+            shortcut = root / "Games" / "Indie" / "Game.lnk"
+            shortcut.parent.mkdir(parents=True)
+            shortcut.write_text("shortcut", encoding="utf-8")
+
+            with mock.patch.object(config, "APP_DIRS", [root]), mock.patch.object(
+                platform_tools, "IS_WIN", True
+            ):
+                found = app_handler.scan_applications()
+
+            self.assertEqual(found, [shortcut])
+
+    def test_linux_application_scanner_reads_desktop_entries_and_display_name(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "applications"
+            nested = root / "Utilities"
+            nested.mkdir(parents=True)
+            launcher = nested / "org.example.Editor.desktop"
+            launcher.write_text(
+                "[Desktop Entry]\nName=Example Editor\nExec=/usr/bin/editor\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(config, "APP_DIRS", [root]), mock.patch.object(
+                platform_tools, "IS_LINUX", True
+            ), mock.patch.object(platform_tools, "IS_MAC", False), mock.patch.object(
+                platform_tools, "IS_WIN", False
+            ):
+                found = app_handler.scan_applications()
+                name = app_handler.get_app_name(launcher)
+
+            self.assertEqual(found, [launcher])
+            self.assertEqual(name, "Example Editor")
+
+    def test_linux_shortcut_copies_desktop_entry_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.desktop"
+            destination = root / "Shortcuts" / "Example.desktop"
+            content = (
+                "[Desktop Entry]\nName=Example\nExec=/usr/bin/example\n"
+                "Type=Application\n"
+            )
+            source.write_text(content, encoding="utf-8")
+
+            with mock.patch.object(platform_tools, "IS_LINUX", True), mock.patch.object(
+                platform_tools, "IS_MAC", False
+            ):
+                created = platform_tools.create_shortcut(source, destination)
+                self.assertEqual(created, destination)
+                self.assertEqual(destination.read_text(encoding="utf-8"), content)
+                self.assertTrue(destination.stat().st_mode & 0o100)
+                with self.assertRaises(FileExistsError):
+                    platform_tools.create_shortcut(source, destination)
+
+    def test_application_scanner_does_not_follow_excluded_subfolders(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Applications"
+            protected = root / "Protected"
+            allowed = root / "Allowed" / "App.app"
+            secret = protected / "Secret.app"
+            allowed.mkdir(parents=True)
+            secret.mkdir(parents=True)
+
+            with mock.patch.object(config, "APP_DIRS", [root]), mock.patch.object(
+                config, "EXCLUDED_FOLDERS", [protected]
+            ), mock.patch.object(platform_tools, "IS_MAC", True):
+                found = app_handler.scan_applications()
+
+            self.assertEqual(found, [allowed])
+
+    def test_screenshot_retention_archives_expired_files_reversibly(self):
+        import config
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            desktop = root / "Desktop"
+            musor = root / "мусор"
+            quarantine = root / "quarantine"
+            desktop.mkdir()
+            musor.mkdir()
+            expired = desktop / "Screenshot old.png"
+            recent = desktop / "Screenshot recent.png"
+            expired.write_text("expired", encoding="utf-8")
+            recent.write_text("recent", encoding="utf-8")
+            now = datetime.now()
+            expired_timestamp = (now - timedelta(minutes=16)).timestamp()
+            recent_timestamp = (now - timedelta(minutes=5)).timestamp()
+            os.utime(expired, (expired_timestamp, expired_timestamp))
+            os.utime(recent, (recent_timestamp, recent_timestamp))
+            history_path = root / "history.json"
+            history = []
+            patches = (
+                mock.patch.object(config, "DESKTOP", desktop),
+                mock.patch.object(config, "MUSOR", musor),
+                mock.patch.object(config, "QUARANTINE_DIR", quarantine),
+                mock.patch.object(config, "HISTORY_PATH", history_path),
+                mock.patch.object(config, "EXCLUDED_FOLDERS", []),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                archived = screenshot_handler.expire_old_screenshots(
+                    history, 15, now=now
+                )
+
+            self.assertEqual(len(archived), 1)
+            self.assertFalse(expired.exists())
+            self.assertTrue(recent.exists())
+            self.assertEqual(archived[0].read_text(encoding="utf-8"), "expired")
+            self.assertEqual(history[0]["action"], "trash")
+            self.assertEqual(history[0]["reason"], "screenshot_retention")
+            self.assertEqual(history[0]["status"], "complete")
+            restored, errors = utils.rollback_entries(
+                history, [history[0]], {}, root / "rollback", allowed_roots(root)
+            )
+            self.assertEqual((restored, errors), (1, []))
+            self.assertEqual(expired.read_text(encoding="utf-8"), "expired")
+
+    def test_screenshot_retention_tracks_renamed_managed_screenshots(self):
+        import config
+        from datetime import datetime, timedelta
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            desktop = root / "Desktop"
+            musor = root / "мусор"
+            quarantine = root / "quarantine"
+            desktop.mkdir()
+            musor.mkdir()
+            renamed = musor / "2026-11-10 18-00.png"
+            renamed.write_text("image", encoding="utf-8")
+            now = datetime.now()
+            old_timestamp = (now - timedelta(minutes=30)).timestamp()
+            os.utime(renamed, (old_timestamp, old_timestamp))
+            history = [{
+                "action": "move",
+                "src": str(desktop / "Screenshot capture.png"),
+                "dst": str(renamed),
+            }]
+            patches = (
+                mock.patch.object(config, "DESKTOP", desktop),
+                mock.patch.object(config, "MUSOR", musor),
+                mock.patch.object(config, "QUARANTINE_DIR", quarantine),
+                mock.patch.object(config, "HISTORY_PATH", root / "history.json"),
+                mock.patch.object(config, "EXCLUDED_FOLDERS", []),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4]:
+                archived = screenshot_handler.expire_old_screenshots(
+                    history, 15, now=now
+                )
+
+            self.assertEqual(len(archived), 1)
+            self.assertFalse(renamed.exists())
+            self.assertTrue(archived[0].exists())
+
+    def test_screenshot_retention_is_disabled_and_validates_interval(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with mock.patch.object(config, "DESKTOP", root), mock.patch.object(
+                config, "MUSOR", root / "мусор"
+            ):
+                self.assertEqual(screenshot_handler.expire_old_screenshots([], 0), [])
+            with self.assertRaisesRegex(ValueError, "срок хранения"):
+                screenshot_handler.expire_old_screenshots([], 10)
 
     def test_alias_move_metadata_is_journaled_before_the_move(self):
         import config
@@ -157,6 +497,31 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertTrue(destination.exists())
             self.assertFalse(original.exists())
+
+    def test_rollback_never_touches_a_newly_excluded_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            protected = root / "Protected"
+            original = protected / "original.txt"
+            destination = protected / "moved.txt"
+            protected.mkdir()
+            destination.write_text("data", encoding="utf-8")
+            entry = {"action": "move", "src": str(original), "dst": str(destination)}
+
+            count, errors = utils.rollback_entries(
+                [entry],
+                [entry],
+                {},
+                root / "rollback",
+                allowed_roots(root),
+                excluded_folders=[protected],
+            )
+
+            self.assertEqual(count, 0)
+            self.assertEqual(len(errors), 1)
+            self.assertTrue(destination.exists())
+            self.assertFalse(original.exists())
+            self.assertNotIn("undone", entry)
 
     def test_alias_rollback_archives_shortcut_and_clears_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:

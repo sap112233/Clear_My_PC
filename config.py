@@ -22,6 +22,7 @@ MUSOR = _desktop_child("мусор")
 APPS_ROOT = _desktop_child("Apps")
 FILES_ROOT = _desktop_child("Файлы")
 APP_DIRS = pt.app_dirs()
+EXCLUDED_FOLDERS: list[Path] = []
 
 # Данные приложения живут в домашней папке, а не рядом с кодом/exe
 DATA_DIR = HOME / ".desktop-keeper"

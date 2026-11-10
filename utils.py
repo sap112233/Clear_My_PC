@@ -91,9 +91,14 @@ def logged_move(
     metadata: dict | None = None,
 ) -> Path:
     import config
+    from organization import is_excluded_path
 
     if action not in {"move", "trash", "alias_move"}:
         raise ValueError(f"Недопустимый тип перемещения: {action}")
+    if is_excluded_path(src, config.EXCLUDED_FOLDERS) or is_excluded_path(
+        dst, config.EXCLUDED_FOLDERS
+    ):
+        raise ValueError("Перемещение затрагивает защищённую папку.")
     if metadata is not None and (
         not isinstance(metadata, dict)
         or {"ts", "action", "src", "dst", "status"} & metadata.keys()
@@ -143,8 +148,12 @@ def rollback_entries(
     state: dict,
     rollback_dir: Path,
     allowed_roots: dict[str, list[Path]],
+    excluded_folders: list[Path] | None = None,
 ) -> tuple[int, list[str]]:
     """Revert selected recorded actions without overwriting existing files."""
+    from organization import is_excluded_path
+
+    excluded_folders = excluded_folders or []
     history_ids = {id(entry) for entry in history}
     restored = 0
     errors = []
@@ -155,6 +164,11 @@ def rollback_entries(
             resolved != root.resolve() and root.resolve() in resolved.parents
             for root in roots
         )
+
+    def reject_excluded_paths(*paths: Path) -> None:
+        for path in paths:
+            if is_excluded_path(path, excluded_folders):
+                raise ValueError(f"Путь защищён и не может быть затронут: {path}")
 
     for entry in entries:
         if id(entry) not in history_ids or entry.get("undone"):
@@ -167,6 +181,7 @@ def rollback_entries(
                 if not src_value or not dst_value:
                     raise ValueError("Для этого действия нет данных для безопасного отката.")
                 original, current = Path(src_value), Path(dst_value)
+                reject_excluded_paths(original, current)
                 if not is_managed_path(original, allowed_roots["move_sources"]):
                     raise ValueError(f"Исходный путь вне разрешённых папок: {original}")
                 if not is_managed_path(current, allowed_roots["move_destinations"]):
@@ -192,6 +207,7 @@ def rollback_entries(
                 if not alias_value:
                     raise ValueError("Для ярлыка не сохранён путь.")
                 alias = Path(alias_value)
+                reject_excluded_paths(alias, rollback_dir)
                 if not is_managed_path(alias, allowed_roots["alias_destinations"]):
                     raise ValueError(f"Ярлык находится вне папки приложений: {alias}")
                 if not is_managed_path(rollback_dir, allowed_roots["rollback_roots"]):
@@ -207,6 +223,7 @@ def rollback_entries(
                 if not src_value or not dst_value:
                     raise ValueError("Для перемещения ярлыка не сохранены пути.")
                 original, current = Path(src_value), Path(dst_value)
+                reject_excluded_paths(original, current)
                 roots = allowed_roots["alias_destinations"]
                 if not is_managed_path(original, roots) or not is_managed_path(current, roots):
                     raise ValueError("Перемещение ярлыка вышло за разрешённые папки.")

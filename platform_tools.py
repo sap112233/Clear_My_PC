@@ -9,9 +9,16 @@ from pathlib import Path
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
+IS_LINUX = sys.platform.startswith("linux")
 
-APP_EXT = ".app" if IS_MAC else ".lnk"
-INSTALLER_EXTS = {".dmg", ".pkg", ".zip"} if IS_MAC else {".exe", ".msi", ".zip"}
+APP_EXT = ".app" if IS_MAC else ".lnk" if IS_WIN else ".desktop"
+INSTALLER_EXTS = (
+    {".dmg", ".pkg", ".zip"}
+    if IS_MAC
+    else {".exe", ".msi", ".zip"}
+    if IS_WIN
+    else {".deb", ".rpm", ".appimage", ".zip"}
+)
 
 
 # ---------- Системные папки ----------
@@ -48,18 +55,26 @@ def downloads_dir() -> Path:
 def app_dirs() -> list[Path]:
     if IS_MAC:
         return [Path("/Applications"), Path.home() / "Applications"]
-    import os
-    return [
-        Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
-        / "Microsoft/Windows/Start Menu/Programs",
-        Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs",
-    ]
+    if IS_WIN:
+        return [
+            Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData"))
+            / "Microsoft/Windows/Start Menu/Programs",
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft/Windows/Start Menu/Programs",
+        ]
+    if IS_LINUX:
+        return [
+            Path.home() / ".local/share/applications",
+            Path("/usr/local/share/applications"),
+            Path("/usr/share/applications"),
+        ]
+    return []
 
 
 # ---------- Ярлыки / алиасы ----------
 
 def create_shortcut(target: Path, dst_no_ext: Path) -> Path:
-    """macOS: алиас Finder. Windows: .lnk (или копия .lnk)."""
+    """Create a Finder alias, Windows shortcut, or Linux desktop-entry copy."""
     if not (target.exists() or target.is_symlink()):
         raise FileNotFoundError(target)
     if IS_MAC:
@@ -81,6 +96,24 @@ def create_shortcut(target: Path, dst_no_ext: Path) -> Path:
             timeout=10,
         )
         return dst_no_ext
+    if IS_LINUX:
+        if target.is_symlink() or target.suffix.lower() != ".desktop":
+            raise ValueError(f"Ожидался файл .desktop: {target}")
+        dst = dst_no_ext.with_suffix(".desktop")
+        if dst.exists() or dst.is_symlink():
+            raise FileExistsError(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        try:
+            with os.fdopen(fd, "wb") as output, target.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+        except BaseException:
+            dst.unlink(missing_ok=True)
+            raise
+        return dst
     dst = dst_no_ext.with_suffix(".lnk")
     if dst.exists() or dst.is_symlink():
         raise FileExistsError(dst)
@@ -120,6 +153,13 @@ def send_to_trash(path: Path) -> bool:
         end run
         '''
         subprocess.run(["osascript", "-e", script, str(path)], check=True, timeout=10)
+        return True
+    if IS_LINUX:
+        subprocess.run(
+            ["gio", "trash", "--", str(path)],
+            check=True,
+            timeout=30,
+        )
         return True
     import ctypes
     from ctypes import byref, wintypes
@@ -185,12 +225,18 @@ def frontmost_app() -> tuple[str, str]:
 # ---------- Куда сохраняются скриншоты ----------
 
 def set_screenshot_location(folder: Path) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
     if IS_MAC:
+        folder.mkdir(parents=True, exist_ok=True)
         subprocess.run(["defaults", "write", "com.apple.screencapture",
                         "location", str(folder)], check=True)
         subprocess.run(["killall", "SystemUIServer"])
+    elif IS_LINUX:
+        raise NotImplementedError(
+            "Изменение системной папки скриншотов не поддерживается "
+            "для Linux: настройте её средствами вашего окружения рабочего стола."
+        )
     else:
+        folder.mkdir(parents=True, exist_ok=True)
         import winreg
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,

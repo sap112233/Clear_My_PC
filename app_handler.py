@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import platform_tools as pt
+import configparser
 import subprocess
 import uuid
 from datetime import datetime
@@ -34,6 +35,16 @@ def get_bundle_id(app_path: Path) -> str:
 
 def get_app_name(app_path: Path) -> str:
     """Получаем читаемое имя приложения."""
+    if pt.IS_LINUX and app_path.suffix.lower() == ".desktop":
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            with app_path.open(encoding="utf-8") as desktop_file:
+                parser.read_file(desktop_file)
+            name = parser.get("Desktop Entry", "Name", fallback="").strip()
+            if name:
+                return name
+        except (OSError, UnicodeError, configparser.Error):
+            pass
     return app_path.stem.replace(".app", "")
 
 
@@ -73,8 +84,11 @@ def ask_category(app_name: str, categories: dict) -> str:
 
 def create_alias(app_path: Path, category: str) -> Path | None:
     alias_path = organization.app_destination(
-        config.APPS_ROOT, category, app_path.stem, pt.IS_MAC
+        config.APPS_ROOT, category, get_app_name(app_path), pt.IS_MAC, pt.IS_LINUX
     )
+    if organization.is_excluded_path(alias_path, config.EXCLUDED_FOLDERS):
+        print(f"  Пропускаю: папка назначения защищена: {alias_path}")
+        return None
     target_folder = alias_path.parent
     target_folder.mkdir(parents=True, exist_ok=True)
     if alias_path.exists() or alias_path.is_symlink():
@@ -101,27 +115,72 @@ def quarantine_installer(path: Path, history: list, destination: Path | None = N
 
 
 def scan_applications() -> list[Path]:
-    """Сканируем /Applications и ~/Applications на .app"""
-    apps = []
+    """Scan standard app folders recursively without entering app bundles or links."""
+    applications = []
     seen = set()
+    visited_directories = set()
+    pending = []
+
     for folder in config.APP_DIRS:
-        if folder.is_dir():
-            for item in folder.iterdir():
-                if item.suffix != pt.APP_EXT or item.is_symlink():
-                    continue
-                identity = str(item.resolve())
-                if identity not in seen:
-                    seen.add(identity)
-                    apps.append(item)
-    return apps
+        if (
+            folder.is_dir()
+            and not folder.is_symlink()
+            and not organization.is_excluded_path(folder, config.EXCLUDED_FOLDERS)
+        ):
+            pending.append(folder)
+
+    while pending:
+        folder = pending.pop()
+        identity = str(folder.resolve()).casefold()
+        if identity in visited_directories:
+            continue
+        visited_directories.add(identity)
+
+        for item in sorted(folder.iterdir()):
+            if (
+                item.is_symlink()
+                or organization.is_excluded_path(item, config.EXCLUDED_FOLDERS)
+            ):
+                continue
+            if pt.IS_MAC and item.is_dir() and item.suffix == ".app":
+                app_identity = str(item.resolve()).casefold()
+                if app_identity not in seen:
+                    seen.add(app_identity)
+                    applications.append(item)
+                continue
+            if pt.IS_WIN and item.is_file() and item.suffix.lower() == ".lnk":
+                app_identity = str(item.resolve()).casefold()
+                if app_identity not in seen:
+                    seen.add(app_identity)
+                    applications.append(item)
+                continue
+            if pt.IS_LINUX and item.is_file() and item.suffix.lower() == ".desktop":
+                app_identity = str(item.resolve()).casefold()
+                if app_identity not in seen:
+                    seen.add(app_identity)
+                    applications.append(item)
+                continue
+            if item.is_dir() and not item.name.startswith("."):
+                pending.append(item)
+
+    return applications
 
 
 def scan_downloads() -> list[Path]:
     """Сканируем ~/Downloads на установщики."""
     installers = []
-    if config.DOWNLOADS.is_dir():
+    if (
+        config.DOWNLOADS.is_dir()
+        and not organization.is_excluded_path(
+            config.DOWNLOADS, config.EXCLUDED_FOLDERS
+        )
+    ):
         for f in config.DOWNLOADS.iterdir():
-            if f.suffix.lower() in pt.INSTALLER_EXTS and not f.is_symlink():
+            if (
+                not organization.is_excluded_path(f, config.EXCLUDED_FOLDERS)
+                and f.suffix.lower() in pt.INSTALLER_EXTS
+                and not f.is_symlink()
+            ):
                 installers.append(f)
     return installers
 
@@ -175,9 +234,12 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         if not category and not dry_run:
             category = ask_category(app_name, categories)
         category = category or "Утилиты"
-        organization.app_destination(
-            config.APPS_ROOT, category, app.stem, pt.IS_MAC
+        dst = organization.app_destination(
+            config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
         )
+        if organization.is_excluded_path(dst, config.EXCLUDED_FOLDERS):
+            print(f"[skip] Папка назначения защищена: {dst}")
+            continue
         new_apps.append((app, app_name, bundle_id, category))
     
     if not new_apps:
@@ -190,7 +252,7 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         print("\nПредпросмотр (dry run):")
         for app, app_name, bundle_id, category in new_apps:
             destination = organization.app_destination(
-                config.APPS_ROOT, category, app.stem, pt.IS_MAC
+                config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
             )
             print(f"  Создать ярлык: {app} → {destination}")
         return False
@@ -198,7 +260,7 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
     print("\nПредпросмотр действий:")
     for app, app_name, bundle_id, category in new_apps:
         destination = organization.app_destination(
-            config.APPS_ROOT, category, app.stem, pt.IS_MAC
+            config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
         )
         print(f"  Создать ярлык: {app} → {destination}")
     if input("\nСоздать эти ярлыки? [y/N] ").strip().lower() != "y":

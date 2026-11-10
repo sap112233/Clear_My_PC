@@ -3,14 +3,15 @@
 """
 from __future__ import annotations
 
-import updater
-import autostart
-import notify
+import logging
+import os
+import queue
 import subprocess
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -18,13 +19,19 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 import app_handler as apps
+import autostart
+import background_monitor
 import categories as cats
 import config
 import file_sorter as sorter
+import notify
 import organization
 import platform_tools as pt
 import screenshot_handler as shots
+import updater
 import utils
+
+logger = logging.getLogger(__name__)
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -84,10 +91,36 @@ def load_cfg() -> dict:
         "installers": True,
     }
     cfg.setdefault("features", dict(default_features))
+    cfg.setdefault("screenshot_retention_minutes", 0)
+    cfg["screenshot_retention_minutes"] = shots.validate_retention_minutes(
+        cfg["screenshot_retention_minutes"]
+    )
+    cfg.setdefault("installer_retention_minutes", 0)
+    cfg["installer_retention_minutes"] = (
+        background_monitor.validate_installer_retention(
+            cfg["installer_retention_minutes"]
+        )
+    )
+    cfg.setdefault("pending_installer_cleanup", [])
+    cfg["pending_installer_cleanup"] = (
+        background_monitor.validate_pending_installers(
+            cfg["pending_installer_cleanup"]
+        )
+    )
+    cfg.setdefault("background_monitoring", False)
+    if not isinstance(cfg["background_monitoring"], bool):
+        raise ValueError("Настройка фонового мониторинга должна быть логической.")
     cfg.setdefault("folders", {"musor": "мусор", "apps": "Apps", "files": "Файлы"})
     cfg.setdefault("layout_mode", "automatic")
     cfg.setdefault("locations", {})
     cfg.setdefault("managed_roots", {key: [] for key in organization.LOCATION_KEYS})
+    cfg["excluded_folders"] = [
+        str(path)
+        for path in organization.validate_excluded_folders(
+            cfg.setdefault("excluded_folders", [])
+        )
+    ]
+    config.EXCLUDED_FOLDERS = [Path(path) for path in cfg["excluded_folders"]]
     cfg.setdefault("app_categories", {})
     cfg.setdefault("custom_file_types", {})
     cfg.setdefault(
@@ -121,6 +154,7 @@ def load_cfg() -> dict:
         raise ValueError("Имена рабочих папок должны быть строками.")
     if any(not isinstance(value, str) for value in cfg["enabled_types"]):
         raise ValueError("Названия типов файлов должны быть строками.")
+    organization.migrate_enabled_file_types(cfg)
     if cfg["layout_mode"] not in {"automatic", "custom"}:
         raise ValueError("Неизвестный режим расположения папок.")
     if not isinstance(cfg["locations"], dict):
@@ -163,6 +197,9 @@ def apply_folder_names(cfg: dict) -> None:
     config.MUSOR = locations["screenshots"]
     config.FILES_ROOT = locations["files"]
     config.APPS_ROOT = locations["apps"]
+    config.EXCLUDED_FOLDERS = organization.validate_excluded_folders(
+        cfg.get("excluded_folders", [])
+    )
 
 
 def unique_destination(path: Path, reserved: set[Path]) -> Path:
@@ -214,7 +251,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.cfg = cfg
         self.on_saved = on_saved
         self.title("Папки и сортировка")
-        self.geometry("760x720")
+        self.geometry("760x900")
         self.transient(parent)
         self.grab_set()
         self.location_vars = {}
@@ -226,8 +263,78 @@ class SettingsWindow(ctk.CTkToplevel):
         self.enabled_types = set(cfg["enabled_types"])
 
         ctk.CTkLabel(
+            self, text="Скриншоты по таймеру", font=("", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+        ctk.CTkLabel(
+            self,
+            text="Пока DesktopKeeper запущен, просроченные скриншоты перемещаются "
+            "в обратимый архив. Таймер выключен по умолчанию.",
+            anchor="w",
+            wraplength=700,
+            text_color=MUTED,
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+        retention_labels = {
+            0: "Выключен",
+            15: "15 минут",
+            30: "30 минут",
+            60: "1 час",
+            240: "4 часа",
+        }
+        self.retention_values = {
+            label: minutes for minutes, label in retention_labels.items()
+        }
+        self.retention_var = ctk.StringVar(
+            value=retention_labels[cfg["screenshot_retention_minutes"]]
+        )
+        ctk.CTkOptionMenu(
+            self,
+            values=list(self.retention_values),
+            variable=self.retention_var,
+            width=180,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(
+            self, text="Установщики после установки приложения", font=("", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(10, 4))
+        ctk.CTkLabel(
+            self,
+            text="Таймер запускается только после обнаружения нового приложения "
+            "и совпадающего установщика в Загрузках. Архив обратим; по умолчанию "
+            "автоматическое перемещение выключено.",
+            anchor="w",
+            wraplength=700,
+            text_color=MUTED,
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+        installer_retention_labels = {
+            0: "Выключен — только вручную",
+            15: "15 минут",
+            30: "30 минут",
+            60: "1 час",
+            240: "4 часа",
+            1440: "24 часа",
+        }
+        self.installer_retention_values = {
+            label: minutes for minutes, label in installer_retention_labels.items()
+        }
+        self.installer_retention_var = ctk.StringVar(
+            value=installer_retention_labels[cfg["installer_retention_minutes"]]
+        )
+        ctk.CTkOptionMenu(
+            self,
+            values=list(self.installer_retention_values),
+            variable=self.installer_retention_var,
+            width=260,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        ctk.CTkLabel(
             self, text="Куда раскладывать", font=("", 18, "bold")
         ).pack(anchor="w", padx=16, pady=(14, 6))
+        ctk.CTkButton(
+            self,
+            text="Защищённые папки…",
+            width=180,
+            command=self.edit_excluded_folders,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
         self.mode_var = ctk.StringVar(value=cfg["layout_mode"])
         modes = ctk.CTkFrame(self, fg_color="transparent")
         modes.pack(fill="x", padx=14)
@@ -321,6 +428,80 @@ class SettingsWindow(ctk.CTkToplevel):
             entry.configure(state=state)
             browse.configure(state=state)
 
+    def edit_excluded_folders(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Защищённые папки")
+        win.geometry("620x420")
+        win.transient(self)
+        win.grab_set()
+        ctk.CTkLabel(
+            win,
+            text="Содержимое этих папок DesktopKeeper не будет сортировать или перемещать.",
+            anchor="w",
+            wraplength=570,
+        ).pack(fill="x", padx=14, pady=(14, 8))
+        rows = ctk.CTkScrollableFrame(win)
+        rows.pack(fill="both", expand=True, padx=14, pady=6)
+
+        def persist(paths: list[str]) -> bool:
+            try:
+                folders = organization.validate_excluded_folders(paths)
+                updated = dict(self.cfg)
+                updated["excluded_folders"] = [str(folder) for folder in folders]
+                utils.save_json(config.CONFIG_PATH, updated)
+                self.cfg.update(updated)
+                config.EXCLUDED_FOLDERS = folders
+            except (OSError, TypeError, ValueError) as exc:
+                messagebox.showerror(
+                    "Не удалось сохранить защищённые папки", str(exc), parent=win
+                )
+                return False
+            return True
+
+        def render():
+            for widget in rows.winfo_children():
+                widget.destroy()
+            if not self.cfg["excluded_folders"]:
+                ctk.CTkLabel(
+                    rows, text="Пока нет защищённых папок.", text_color=MUTED
+                ).pack(anchor="w", padx=8, pady=8)
+            for folder in self.cfg["excluded_folders"]:
+                row = ctk.CTkFrame(rows, fg_color="transparent")
+                row.pack(fill="x", padx=4, pady=3)
+                ctk.CTkLabel(
+                    row, text=folder, anchor="w", wraplength=440
+                ).pack(side="left", fill="x", expand=True, padx=6)
+                ctk.CTkButton(
+                    row,
+                    text="Убрать",
+                    width=72,
+                    fg_color="#7a3b3b",
+                    command=lambda selected=folder: remove(selected),
+                ).pack(side="right")
+
+        def remove(folder: str):
+            remaining = [
+                item for item in self.cfg["excluded_folders"] if item != folder
+            ]
+            if persist(remaining):
+                render()
+
+        def add():
+            selected = filedialog.askdirectory(
+                parent=win,
+                title="Выбери папку, которую нужно защитить",
+                mustexist=True,
+            )
+            if not selected:
+                return
+            if persist([*self.cfg["excluded_folders"], selected]):
+                render()
+
+        ctk.CTkButton(
+            win, text="Добавить папку…", command=add
+        ).pack(anchor="w", padx=14, pady=(4, 14))
+        render()
+
     def render_file_types(self):
         for widget in self.types_frame.winfo_children():
             widget.destroy()
@@ -385,6 +566,12 @@ class SettingsWindow(ctk.CTkToplevel):
         updated["enabled_types"] = [
             name for name, var in self.type_vars.items() if var.get()
         ]
+        updated["screenshot_retention_minutes"] = self.retention_values[
+            self.retention_var.get()
+        ]
+        updated["installer_retention_minutes"] = (
+            self.installer_retention_values[self.installer_retention_var.get()]
+        )
         try:
             locations = organization.resolve_locations(
                 updated, config.DESKTOP, config.HOME
@@ -428,10 +615,14 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
 
     if feat["screenshots"]:
         for f in shots.collect():
+            if organization.is_excluded_path(f, config.EXCLUDED_FOLDERS):
+                continue
             dst = reserve_destination(
                 utils.safe_child_path(config.MUSOR, shots.build_name(f, "", "")),
                 reserved,
             )
+            if organization.is_excluded_path(dst, config.EXCLUDED_FOLDERS):
+                continue
             if f == dst:
                 continue
             actions.append({
@@ -448,11 +639,16 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
     if feat["sort_files"]:
         enabled = set(cfg["enabled_types"])
         for f, t in sorter.collect(cfg["custom_file_types"]):
-            if t not in enabled:
+            if (
+                t not in enabled
+                or organization.is_excluded_path(f, config.EXCLUDED_FOLDERS)
+            ):
                 continue
             dst = reserve_destination(
                 utils.safe_child_path(config.FILES_ROOT, t, f.name), reserved
             )
+            if organization.is_excluded_path(dst, config.EXCLUDED_FOLDERS):
+                continue
             actions.append({
                 "kind": "move", "src": f, "dst": dst,
                 "_source_root": "desktop",
@@ -471,6 +667,8 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
         active_aliases = organization.active_aliases(history or [])
         app_roots = app_roots_for(cfg)
         for app in apps.scan_applications():
+            if organization.is_excluded_path(app, config.EXCLUDED_FOLDERS):
+                continue
             name = apps.get_app_name(app)
             bid = apps.get_bundle_id(app)
             previous = active_aliases.get(str(app.resolve()))
@@ -496,8 +694,10 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
                 or "Другое"
             )
             actual_dst = organization.app_destination(
-                config.APPS_ROOT, cat, app.stem, pt.IS_MAC
+                config.APPS_ROOT, cat, apps.get_app_name(app), pt.IS_MAC, pt.IS_LINUX
             )
+            if organization.is_excluded_path(actual_dst, config.EXCLUDED_FOLDERS):
+                continue
             kind = "alias"
             app_source = app
             if previous:
@@ -545,6 +745,8 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
     if feat["installers"]:
         app_names = {apps.get_app_name(a).lower() for a in apps.scan_applications()}
         for ins in apps.scan_downloads():
+            if organization.is_excluded_path(ins, config.EXCLUDED_FOLDERS):
+                continue
             n = ins.stem.lower()
             if any(n in a or a in n for a in app_names):
                 dst = reserve_destination(config.QUARANTINE_DIR / ins.name, reserved)
@@ -597,6 +799,15 @@ def apply_actions(actions: list[dict], history: list, cfg: dict) -> int:
             continue
         try:
             src = a["src"]
+            excluded_folders = organization.validate_excluded_folders(
+                cfg.get("excluded_folders", [])
+            )
+            if organization.is_excluded_path(src, excluded_folders) or organization.is_excluded_path(
+                a["dst"], excluded_folders
+            ):
+                raise ValueError(
+                    "Действие затрагивает защищённую папку. Выполни новое сканирование."
+                )
             if not (src.exists() or src.is_symlink()):
                 raise FileNotFoundError(f"Исходный файл больше не существует: {src}")
             kind_roots = {
@@ -612,7 +823,7 @@ def apply_actions(actions: list[dict], history: list, cfg: dict) -> int:
             validate_action_source(
                 src,
                 kind_roots[a["kind"]],
-                direct_child=a["kind"] != "alias_move",
+                direct_child=a["kind"] not in {"alias", "alias_move"},
             )
             destination_root = roots[a["_destination_root"]]
             try:
@@ -716,6 +927,100 @@ class ShotWatcher(FileSystemEventHandler):
         if shots.is_screenshot(p) and utils.wait_stable(p):
             self.on_shot(p)
 
+    def on_moved(self, event):
+        p = Path(event.dest_path)
+        if shots.is_screenshot(p) and utils.wait_stable(p):
+            self.on_shot(p)
+
+
+def safe_watch_directories(roots: list[Path]) -> list[Path]:
+    directories = []
+    seen = set()
+    pending = list(roots)
+    while pending:
+        folder = pending.pop()
+        if (
+            folder.is_symlink()
+            or not folder.is_dir()
+            or organization.is_excluded_path(folder, config.EXCLUDED_FOLDERS)
+        ):
+            continue
+        resolved = folder.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        directories.append(folder)
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                child = Path(entry.path)
+                if (
+                    entry.is_dir(follow_symlinks=False)
+                    and not entry.name.startswith(".")
+                    and not (pt.IS_MAC and child.suffix.lower() == ".app")
+                    and not organization.is_excluded_path(
+                        child, config.EXCLUDED_FOLDERS
+                    )
+                ):
+                    pending.append(child)
+    return directories
+
+
+class ActivityWatcher(FileSystemEventHandler):
+    def __init__(self, app_roots, downloads, on_application, on_installer):
+        self.app_roots = [root.resolve() for root in app_roots]
+        self.downloads = downloads.resolve()
+        self.on_application = on_application
+        self.on_installer = on_installer
+
+    def _handle_path(self, path: Path) -> None:
+        if path.is_symlink():
+            return
+        path = path.resolve()
+        if organization.is_excluded_path(path, config.EXCLUDED_FOLDERS):
+            return
+        try:
+            relative_to_downloads = path.relative_to(self.downloads)
+        except ValueError:
+            relative_to_downloads = None
+        if (
+            relative_to_downloads is not None
+            and len(relative_to_downloads.parts) == 1
+            and path.is_file()
+            and path.suffix.lower() in pt.INSTALLER_EXTS
+        ):
+            self.on_installer(path)
+            return
+
+        supported = (
+            (pt.IS_MAC and path.suffix.lower() == ".app" and path.is_dir())
+            or (pt.IS_WIN and path.suffix.lower() == ".lnk" and path.is_file())
+            or (
+                pt.IS_LINUX
+                and path.suffix.lower() == ".desktop"
+                and path.is_file()
+            )
+        )
+        if not supported:
+            return
+        for root in self.app_roots:
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
+            if pt.IS_MAC and any(
+                Path(*relative.parts[:index]).suffix.lower() == ".app"
+                for index in range(1, len(relative.parts))
+            ):
+                return
+            self.on_application(path)
+            return
+
+    def on_created(self, event):
+        self._handle_path(Path(event.src_path))
+
+    def on_moved(self, event):
+        self._handle_path(Path(event.dest_path))
+
 
 HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
 
@@ -736,8 +1041,14 @@ HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
    Ярлыки перемещаются в архив отката, не удаляясь безвозвратно.
 
 ФОНОВЫЙ МОНИТОРИНГ
-Включи тумблер «Мониторинг» — новые скриншоты будут
-показаны в отдельном окне; перемещение произойдёт только после разрешения.
+Включи тумблер «Фоновый мониторинг» — программа уведомит о новых скриншотах,
+приложениях и установщиках. Перемещения требуют твоего подтверждения.
+При включённом автозапуске разрешённый мониторинг включится после входа в систему.
+Для установщиков можно отдельно выбрать срок до обратимого перемещения в архив.
+Мониторинг действует только пока программа запущена и охватывает стандартные
+папки системы; он не видит каждый менеджер пакетов, путь установки или кэш.
+Сопоставление установщика выполняется по имени и не доказывает причинную связь.
+В Linux нельзя универсально менять папку снимков для всех окружений и приложений.
 
 КАТЕГОРИИ
 Кнопка «Приложения» позволяет назначить категорию каждому приложению,
@@ -751,6 +1062,9 @@ HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
 по расширениям. Пользовательские папки должны быть внутри домашней
 папки пользователя. На Windows и macOS перемещаются только файлы
 и создаваемые ярлыки, сами установленные приложения не перемещаются.
+В «Папки и типы → Защищённые папки» добавь места, которые приложение
+не должно сканировать или изменять. Это правило также проверяется перед
+перемещением и откатом.
 
 БЕЗОПАСНОСТЬ
 Все действия логируются. Папки-категории и папки типов
@@ -813,6 +1127,17 @@ class Wizard(ctk.CTk):
         self.cfg["layout_mode"] = self.cfg.get("layout_mode", "automatic")
         for k in self.cfg["features"]:
             self.cfg["features"][k] = self.vars[f"feat_{k}"].get()
+        try:
+            organization.configure_screenshot_folder(
+                self.cfg,
+                self.vars["screenshot_folder_choice"].get(),
+                self.selected_screenshot_folder,
+                config.DESKTOP,
+                config.HOME,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Папка скриншотов", str(exc), parent=self)
+            return False
         available_types = list(sorter.TYPE_MAP) + list(self.cfg["custom_file_types"]) + ["Другое"]
         enabled_before = set(self.cfg["enabled_types"])
         self.cfg["enabled_types"] = []
@@ -857,6 +1182,70 @@ class Wizard(ctk.CTk):
             ctk.CTkLabel(self.frame, text="Пара вопросов", font=("", 24, "bold")).pack(pady=(16, 6))
             box = ctk.CTkScrollableFrame(self.frame)
             box.pack(fill="both", expand=True, padx=8)
+            ctk.CTkLabel(
+                box,
+                text="Куда складывать скриншоты?",
+                justify="left",
+                font=("", 14, "bold"),
+            ).pack(anchor="w", padx=8, pady=(8, 2))
+            ctk.CTkLabel(
+                box,
+                text="Папки назначения не создаются при запуске или сканировании. "
+                "Новая папка появится только после подтверждённого действия.",
+                justify="left",
+                wraplength=540,
+                text_color=MUTED,
+            ).pack(anchor="w", padx=8, pady=(0, 4))
+            self.vars["screenshot_folder_choice"] = ctk.StringVar(
+                value="desktop"
+            )
+            self.selected_screenshot_folder = None
+            ctk.CTkRadioButton(
+                box,
+                text=f"Предложить папку «{self.cfg['folders']['musor']}» "
+                "на рабочем столе",
+                variable=self.vars["screenshot_folder_choice"],
+                value="desktop",
+            ).pack(anchor="w", padx=16, pady=2)
+            ctk.CTkLabel(
+                box,
+                text="Она будет создана только если ты применишь перемещение.",
+                text_color=MUTED,
+            ).pack(anchor="w", padx=42, pady=(0, 2))
+            ctk.CTkRadioButton(
+                box,
+                text="Выбрать существующую папку",
+                variable=self.vars["screenshot_folder_choice"],
+                value="existing",
+            ).pack(anchor="w", padx=16, pady=2)
+            self.screenshot_folder_label = ctk.CTkLabel(
+                box, text="Папка не выбрана", text_color=MUTED, anchor="w"
+            )
+            self.screenshot_folder_label.pack(anchor="w", padx=42, pady=(0, 2))
+
+            def choose_screenshot_folder():
+                selected = filedialog.askdirectory(
+                    parent=self,
+                    title="Выбери существующую папку для скриншотов",
+                    mustexist=True,
+                )
+                if selected:
+                    self.selected_screenshot_folder = selected
+                    self.vars["screenshot_folder_choice"].set("existing")
+                    self.screenshot_folder_label.configure(text=selected)
+
+            ctk.CTkButton(
+                box,
+                text="Обзор…",
+                width=100,
+                command=choose_screenshot_folder,
+            ).pack(anchor="w", padx=42, pady=(0, 2))
+            ctk.CTkRadioButton(
+                box,
+                text="Оставлять скриншоты на месте",
+                variable=self.vars["screenshot_folder_choice"],
+                value="leave",
+            ).pack(anchor="w", padx=16, pady=2)
             ctk.CTkLabel(box, text="Имена папок на рабочем столе:", justify="left",
                          font=("", 14, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
             for key, label in (("musor", "куда складывать скриншоты"),
@@ -899,7 +1288,7 @@ class Wizard(ctk.CTk):
             ctk.CTkLabel(self.frame, text="Всё готово", font=("", 26, "bold")).pack(pady=(40, 8))
             ctk.CTkLabel(self.frame, justify="left", font=("", 14), text=(
                 f"Папки: {self.cfg['folders']['musor']}, {self.cfg['folders']['apps']}, "
-                f"{self.cfg['folders']['files']} (создадутся сами).\n\n"
+                f"{self.cfg['folders']['files']} появятся только для подтверждённых действий.\n\n"
                 "Нажми «Начать сканирование» — я один раз пройду по системе\n"
                 "и покажу, что и куда предлагаю переместить.")).pack(padx=30)
             self.nav(last=True)
@@ -917,6 +1306,10 @@ class Main(ctk.CTk):
         self.actions: list[dict] = []
         self.history = history
         self.observer = None
+        self.monitor_seen = set()
+        self.monitor_seen_installers = set()
+        self.monitor_events = queue.SimpleQueue()
+        self.pending_monitor_events = []
         self.pending_shots: list[Path] = []
         self.shot_preview_window = None
         self.title("DesktopKeeper")
@@ -970,18 +1363,22 @@ class Main(ctk.CTk):
         if autostart.is_enabled():
             self.auto.select()
         ToolTip(self.auto, "Запускать DesktopKeeper при входе в систему")
+        self.mon = ctk.CTkSwitch(
+            sidebar, text="Фоновый мониторинг", command=self.toggle_watch,
+            progress_color=ACCENT, button_color=ACCENT,
+            button_hover_color=ACCENT_HOVER,
+        )
+        self.mon.pack(side="bottom", anchor="w", padx=22, pady=(0, 12))
+        ToolTip(
+            self.mon,
+            "По твоему разрешению следит за новыми скриншотами, приложениями "
+            "и установщиками; файлы не перемещаются без подтверждения.",
+        )
         self.monitor_status = ctk.CTkLabel(
             sidebar, text="●  Мониторинг выключен", text_color=MUTED,
             font=("", 12),
         )
         self.monitor_status.pack(side="bottom", anchor="w", padx=22, pady=(0, 8))
-        self.mon = ctk.CTkSwitch(
-            sidebar, text="Мониторинг скриншотов", command=self.toggle_watch,
-            progress_color=ACCENT, button_color=ACCENT,
-            button_hover_color=ACCENT_HOVER,
-        )
-        self.mon.pack(side="bottom", anchor="w", padx=22, pady=(0, 12))
-        ToolTip(self.mon, "Для каждого нового скриншота сначала показывается запрос на перемещение")
 
         content = ctk.CTkFrame(self, fg_color="transparent")
         content.pack(side="left", fill="both", expand=True, padx=38, pady=(28, 22))
@@ -1057,7 +1454,14 @@ class Main(ctk.CTk):
         self.btn_undo.pack(side="left", padx=(18, 0))
         self.last_scan = None
         self._show_empty_state()
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        if self.cfg["background_monitoring"]:
+            self.mon.select()
+            self.after(500, self.toggle_watch)
         self.after(1500, self.schedule_update_check)
+        self.after(5000, self.run_screenshot_retention_check)
+        self.after(5000, self.run_installer_retention_check)
+        self.after(250, self._drain_monitor_events)
 
     def _add_nav(self, parent, key, text, command):
         def navigate():
@@ -1227,6 +1631,172 @@ class Main(ctk.CTk):
     def settings_saved(self):
         self.status.configure(text="Настройки сохранены. Новые назначения будут показаны при следующем сканировании.")
 
+    def _drain_monitor_events(self):
+        for _ in range(100):
+            try:
+                event_type, path, ready_at = self.monitor_events.get_nowait()
+            except queue.Empty:
+                break
+            self.pending_monitor_events.append((event_type, path, ready_at))
+        now_monotonic = monotonic()
+        ready = [
+            event for event in self.pending_monitor_events
+            if event[2] <= now_monotonic
+        ]
+        self.pending_monitor_events = [
+            event for event in self.pending_monitor_events
+            if event[2] > now_monotonic
+            or event[0] == "update_result"
+        ]
+        for event_type, payload, _ in ready:
+            if event_type == "update_result":
+                self._handle_update_result(payload)
+            elif self.cfg["background_monitoring"] and event_type == "screenshot":
+                self.queue_screenshot_review(payload)
+            elif self.cfg["background_monitoring"] and event_type == "application":
+                self._handle_new_application(payload)
+            elif self.cfg["background_monitoring"] and event_type == "installer":
+                self._handle_new_installer(payload)
+        if self.winfo_exists():
+            self.after(250, self._drain_monitor_events)
+
+    def run_screenshot_retention_check(self):
+        retention = self.cfg.get("screenshot_retention_minutes", 0)
+        try:
+            expired = shots.expire_old_screenshots(self.history, retention)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Таймер скриншотов", str(exc), parent=self)
+        else:
+            if expired:
+                self.status.configure(
+                    text=f"В архив перемещено скриншотов: {len(expired)}."
+                )
+                notify.notify(
+                    f"В архив перемещено скриншотов по таймеру: {len(expired)}"
+                )
+        self.after(60_000, self.run_screenshot_retention_check)
+
+    def _schedule_matched_installers(self, app_name: str) -> int:
+        pending = list(self.cfg["pending_installer_cleanup"])
+        scheduled = 0
+        for installer in apps.scan_downloads():
+            if background_monitor.schedule_installer(
+                pending,
+                installer,
+                app_name,
+                self.cfg["installer_retention_minutes"],
+                config.DOWNLOADS,
+                config.EXCLUDED_FOLDERS,
+            ):
+                scheduled += 1
+        if scheduled:
+            previous = self.cfg["pending_installer_cleanup"]
+            self.cfg["pending_installer_cleanup"] = pending
+            try:
+                utils.save_json(config.CONFIG_PATH, self.cfg)
+            except (OSError, TypeError, ValueError):
+                self.cfg["pending_installer_cleanup"] = previous
+                raise
+        return scheduled
+
+    def _handle_new_application(self, path: Path) -> None:
+        if not path.exists() or path.is_symlink() or organization.is_excluded_path(
+            path, config.EXCLUDED_FOLDERS
+        ):
+            return
+        identity = str(path.resolve()).casefold()
+        if identity in self.monitor_seen:
+            return
+        installed = apps.scan_applications()
+        if not any(item.resolve() == path.resolve() for item in installed):
+            return
+        self.monitor_seen.add(identity)
+        name = apps.get_app_name(path)
+        try:
+            scheduled = self._schedule_matched_installers(name)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Таймер установщиков", str(exc), parent=self)
+            scheduled = 0
+        if scheduled:
+            notify.notify(
+                f"Установщик {name} переместится в архив через "
+                f"{self.cfg['installer_retention_minutes']} мин."
+            )
+        notify.notify(f"Обнаружено новое приложение: {name}")
+        if messagebox.askyesno(
+            "Новое приложение",
+            f"Обнаружено приложение «{name}».\n"
+            "Просканировать приложения и показать предлагаемый ярлык?",
+            parent=self,
+        ):
+            self.scan()
+
+    def _handle_new_installer(self, path: Path) -> None:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or organization.is_excluded_path(path, config.EXCLUDED_FOLDERS)
+        ):
+            return
+        identity = str(path.resolve()).casefold()
+        if identity in self.monitor_seen_installers:
+            return
+        self.monitor_seen_installers.add(identity)
+        installed_names = [apps.get_app_name(item) for item in apps.scan_applications()]
+        matching = next(
+            (
+                name
+                for name in installed_names
+                if background_monitor.matches_installed_app(path, name)
+            ),
+            None,
+        )
+        try:
+            scheduled = (
+                self._schedule_matched_installers(matching) if matching else 0
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Таймер установщиков", str(exc), parent=self)
+            scheduled = 0
+        if scheduled:
+            notify.notify(
+                f"Установщик для {matching} переместится в обратимый архив через "
+                f"{self.cfg['installer_retention_minutes']} мин."
+            )
+        else:
+            notify.notify(
+                f"Найден установщик: {path.name}. Он останется на месте до "
+                "подтверждения после установки приложения."
+            )
+
+    def run_installer_retention_check(self):
+        if self.cfg["pending_installer_cleanup"]:
+            try:
+                installed_names = [
+                    apps.get_app_name(item) for item in apps.scan_applications()
+                ]
+                pending, archived = background_monitor.expire_due_installers(
+                    self.cfg["pending_installer_cleanup"],
+                    installed_names,
+                    config.DOWNLOADS,
+                    config.QUARANTINE_DIR,
+                    self.history,
+                    config.EXCLUDED_FOLDERS,
+                )
+                self.cfg["pending_installer_cleanup"] = pending
+                utils.save_json(config.CONFIG_PATH, self.cfg)
+            except (OSError, TypeError, ValueError) as exc:
+                messagebox.showerror("Таймер установщиков", str(exc), parent=self)
+            else:
+                if archived:
+                    self.status.configure(
+                        text=f"Установщиков перемещено в обратимый архив: {len(archived)}."
+                    )
+                    notify.notify(
+                        f"Установщики перемещены в обратимый архив: {len(archived)}"
+                    )
+        self.after(60_000, self.run_installer_retention_check)
+
     def toggle_theme(self):
         theme = "dark" if self.theme.get() else "light"
         previous = self.cfg["theme"]
@@ -1251,10 +1821,22 @@ class Main(ctk.CTk):
 
     def _update_check(self):
         rel = updater.check_update()
-        self.cfg["last_update_check"] = datetime.now().date().isoformat()
-        utils.save_json(config.CONFIG_PATH, self.cfg)
+        checked_at = datetime.now().date().isoformat()
+        self.monitor_events.put(("update_result", (rel, checked_at), 0))
+
+    def _handle_update_result(self, result):
+        rel, checked_at = result
+        self.cfg["last_update_check"] = checked_at
+        try:
+            utils.save_json(config.CONFIG_PATH, self.cfg)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "Не удалось сохранить проверку обновлений",
+                str(exc),
+                parent=self,
+            )
         if rel:
-            self.after(0, lambda: self._show_update(rel))
+            self._show_update(rel)
 
     def _show_update(self, rel):
         notify.notify(f"Доступная новая версия: {rel['tag']}")
@@ -1316,7 +1898,11 @@ class Main(ctk.CTk):
             if other is not action and other["kind"] in {"alias", "alias_move"}
         }
         destination = organization.app_destination(
-            config.APPS_ROOT, category, action["src"].stem, pt.IS_MAC
+            config.APPS_ROOT,
+            category,
+            apps.get_app_name(action["src"]),
+            pt.IS_MAC,
+            pt.IS_LINUX,
         )
         if action["kind"] == "alias_move" and destination == action["src"]:
             action["dst"] = destination
@@ -1373,7 +1959,11 @@ class Main(ctk.CTk):
         self.after_idle(self.show_next_screenshot_preview)
 
     def queue_screenshot_review(self, path: Path):
-        if shots.is_screenshot(path) and path not in self.pending_shots:
+        if (
+            not organization.is_excluded_path(path, config.EXCLUDED_FOLDERS)
+            and shots.is_screenshot(path)
+            and path not in self.pending_shots
+        ):
             self.pending_shots.append(path)
         self.show_next_screenshot_preview()
 
@@ -1420,6 +2010,14 @@ class Main(ctk.CTk):
                     apply_folder_names(self.cfg)
                     if not shots.is_screenshot(source):
                         raise FileNotFoundError(f"Скриншот больше не доступен: {source}")
+                    if organization.is_excluded_path(
+                        source, config.EXCLUDED_FOLDERS
+                    ) or organization.is_excluded_path(
+                        destination, config.EXCLUDED_FOLDERS
+                    ):
+                        raise ValueError(
+                            "Скриншот или его назначение попадает в защищённую папку."
+                        )
                     validate_action_source(
                         source,
                         [config.DESKTOP, config.MUSOR],
@@ -1564,6 +2162,7 @@ class Main(ctk.CTk):
                         ],
                         "rollback_roots": [config.DATA_DIR],
                     },
+                    excluded_folders=config.EXCLUDED_FOLDERS,
                 )
                 utils.save_json(config.HISTORY_PATH, self.history)
                 utils.save_json(config.STATE_PATH, state)
@@ -1600,28 +2199,125 @@ class Main(ctk.CTk):
 
     # ---------- мониторинг ----------
     def toggle_watch(self):
-        if self.mon.get():
-            def on_shot(p: Path):
-                self.after(0, lambda: self.queue_screenshot_review(p))
-            self.observer = Observer()
-            folders = dict.fromkeys(
-                folder.resolve() for folder in (config.DESKTOP, config.MUSOR)
-            )
-            for folder in folders:
-                folder.mkdir(parents=True, exist_ok=True)
-                self.observer.schedule(ShotWatcher(on_shot), str(folder), recursive=False)
-            self.observer.start()
+        enabled = bool(self.mon.get())
+        previous = self.cfg["background_monitoring"]
+        if enabled and not previous and not messagebox.askyesno(
+            "Разрешить фоновый мониторинг",
+            "DesktopKeeper будет наблюдать только существующие стандартные папки "
+            "рабочего стола, загрузок и приложений, которые не защищены в настройках.\n\n"
+            "Приложение не может гарантировать обнаружение всех установок. "
+            "Мониторинг не перемещает файлы без твоего подтверждения; таймер "
+            "установщиков — отдельная настройка.\n\nВключить мониторинг?",
+            parent=self,
+        ):
+            self.mon.deselect()
+            return
+        self.cfg["background_monitoring"] = enabled
+        try:
+            utils.save_json(config.CONFIG_PATH, self.cfg)
+            if enabled:
+                observer = Observer()
+                watched = set()
+                screenshot_roots = dict.fromkeys(
+                    folder.resolve()
+                    for folder in (config.DESKTOP, config.MUSOR)
+                    if folder.is_dir()
+                    and not organization.is_excluded_path(
+                        folder, config.EXCLUDED_FOLDERS
+                    )
+                )
+                for folder in screenshot_roots:
+                    observer.schedule(
+                        ShotWatcher(
+                            lambda p: self.monitor_events.put(
+                                ("screenshot", p, 0)
+                            )
+                        ),
+                        str(folder),
+                        recursive=False,
+                    )
+                    watched.add(folder)
+
+                app_roots = [
+                    folder
+                    for folder in config.APP_DIRS
+                    if folder.is_dir()
+                    and not organization.is_excluded_path(
+                        folder, config.EXCLUDED_FOLDERS
+                    )
+                ]
+                activity_handler = ActivityWatcher(
+                    app_roots,
+                    config.DOWNLOADS,
+                    lambda p: self.monitor_events.put(
+                        ("application", p, monotonic() + 2.5)
+                    ),
+                    lambda p: self.monitor_events.put(
+                        ("installer", p, monotonic() + 1.5)
+                    ),
+                )
+                for folder in safe_watch_directories(app_roots):
+                    if folder.resolve() not in watched:
+                        observer.schedule(
+                            activity_handler, str(folder), recursive=False
+                        )
+                        watched.add(folder.resolve())
+                if (
+                    config.DOWNLOADS.is_dir()
+                    and not organization.is_excluded_path(
+                        config.DOWNLOADS, config.EXCLUDED_FOLDERS
+                    )
+                    and config.DOWNLOADS.resolve() not in watched
+                ):
+                    observer.schedule(
+                        activity_handler, str(config.DOWNLOADS), recursive=False
+                    )
+                    watched.add(config.DOWNLOADS.resolve())
+                if not watched:
+                    raise ValueError(
+                        "Нет доступных папок для мониторинга. "
+                        "Новые папки не создавались."
+                    )
+                observer.start()
+                self.observer = observer
+            elif self.observer:
+                self.observer.stop()
+                self.observer.join(timeout=5)
+                self.observer = None
             self.monitor_status.configure(
-                text="●  Мониторинг активен", text_color="#36A853",
+                text=(
+                    "●  Мониторинг активен" if enabled
+                    else "●  Мониторинг выключен"
+                ),
+                text_color="#36A853" if enabled else MUTED,
             )
-            self.status.configure(text="Мониторинг включён.")
-        elif self.observer:
+            self.status.configure(
+                text="Мониторинг включён." if enabled else "Мониторинг выключен."
+            )
+        except (OSError, TypeError, ValueError, RuntimeError) as exc:
+            if self.observer:
+                self.observer.stop()
+                self.observer.join(timeout=5)
+                self.observer = None
+            self.cfg["background_monitoring"] = previous
+            self.mon.select() if previous else self.mon.deselect()
+            try:
+                utils.save_json(config.CONFIG_PATH, self.cfg)
+            except (OSError, TypeError, ValueError) as save_error:
+                logger.exception("Не удалось сохранить состояние мониторинга")
+                messagebox.showerror(
+                    "Не удалось сохранить настройку мониторинга",
+                    str(save_error),
+                    parent=self,
+                )
+            messagebox.showerror("Ошибка мониторинга", str(exc), parent=self)
+
+    def close(self):
+        if self.observer:
             self.observer.stop()
+            self.observer.join(timeout=5)
             self.observer = None
-            self.monitor_status.configure(
-                text="●  Мониторинг выключен", text_color=MUTED,
-            )
-            self.status.configure(text="Мониторинг выключен.")
+        self.destroy()
 
     def toggle_autostart(self):
         enabling = bool(self.auto.get())
@@ -1667,7 +2363,11 @@ class Main(ctk.CTk):
             name = ent.get().strip()
             if not name:
                 return
-            folder = cats.add_category(name)
+            try:
+                folder = cats.add_category(name)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Не удалось создать категорию", str(exc), parent=win)
+                return
             self.cfg["categories"].setdefault(folder.name, [])
             utils.save_json(config.CONFIG_PATH, self.cfg)
             ent.delete(0, "end")

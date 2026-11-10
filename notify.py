@@ -1,6 +1,7 @@
 """Системные уведомления: macOS (osascript) и Windows (Toast через PowerShell)."""
 from __future__ import annotations
 
+import logging
 import subprocess
 
 import platform_tools as pt
@@ -27,5 +28,13 @@ def notify(text: str) -> None:
             """
             subprocess.run(["powershell", "-NoProfile", "-Command", ps],
                            check=False, timeout=10)
-    except Exception:
-        pass
+        elif pt.IS_LINUX:
+            subprocess.run(
+                ["notify-send", "--app-name=DesktopKeeper", TITLE, text],
+                check=True,
+                timeout=10,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logging.getLogger(__name__).warning(
+            "Не удалось показать системное уведомление DesktopKeeper: %s", exc
+        )

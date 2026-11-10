@@ -12,6 +12,44 @@ from utils import safe_child_path
 
 LABEL = "com.desktopkeeper"
 PLIST = safe_child_path(Path.home(), "Library", "LaunchAgents", f"{LABEL}.plist")
+LINUX_AUTOSTART = safe_child_path(
+    Path.home(), ".config", "autostart", "desktopkeeper.desktop"
+)
+
+
+def _is_our_linux_entry() -> bool:
+    if LINUX_AUTOSTART.is_symlink() or not LINUX_AUTOSTART.is_file():
+        return False
+    try:
+        content = LINUX_AUTOSTART.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return (
+        "[Desktop Entry]" in content
+        and "Name=DesktopKeeper" in content
+        and "X-DesktopKeeper-Autostart=true" in content
+    )
+
+
+def _desktop_exec_argument(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("%", "%%")
+    )
+    return f'"{escaped}"'
+
+
+def _linux_autostart_content(command: list[str]) -> str:
+    exec_line = " ".join(_desktop_exec_argument(argument) for argument in command)
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=DesktopKeeper\n"
+        f"Exec={exec_line}\n"
+        "Terminal=false\n"
+        "X-DesktopKeeper-Autostart=true\n"
+    )
 
 
 def launch_command() -> list[str]:
@@ -23,6 +61,8 @@ def launch_command() -> list[str]:
 def is_enabled() -> bool:
     if pt.IS_MAC:
         return PLIST.is_file()
+    if pt.IS_LINUX:
+        return _is_our_linux_entry()
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
@@ -61,6 +101,46 @@ def enable() -> None:
             if temp_path and temp_path.exists():
                 temp_path.unlink()
         subprocess.run(["launchctl", "load", "-w", str(PLIST)], check=True)
+    elif pt.IS_LINUX:
+        if LINUX_AUTOSTART.is_symlink():
+            raise ValueError(
+                f"Файл автозапуска не должен быть символической ссылкой: "
+                f"{LINUX_AUTOSTART}"
+            )
+        if LINUX_AUTOSTART.exists() and not _is_our_linux_entry():
+            raise FileExistsError(
+                f"Отказываюсь перезаписывать неизвестный файл автозапуска: "
+                f"{LINUX_AUTOSTART}"
+            )
+        LINUX_AUTOSTART.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if LINUX_AUTOSTART.parent.is_symlink():
+            raise ValueError(
+                f"Папка автозапуска не должна быть символической ссылкой: "
+                f"{LINUX_AUTOSTART.parent}"
+            )
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=LINUX_AUTOSTART.parent,
+                prefix=".desktopkeeper.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                temp_file.write(_linux_autostart_content(cmd))
+                temp_file.flush()
+            temp_path.chmod(0o600)
+            if LINUX_AUTOSTART.is_symlink():
+                raise ValueError(
+                    f"Файл автозапуска не должен быть символической ссылкой: "
+                    f"{LINUX_AUTOSTART}"
+                )
+            temp_path.replace(LINUX_AUTOSTART)
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
     else:
         import winreg
         value = subprocess.list2cmdline(cmd)
@@ -77,6 +157,19 @@ def disable() -> None:
         if PLIST.is_file():
             subprocess.run(["launchctl", "unload", str(PLIST)], check=True)
             PLIST.unlink()
+    elif pt.IS_LINUX:
+        if LINUX_AUTOSTART.is_symlink():
+            raise ValueError(
+                f"Файл автозапуска не должен быть символической ссылкой: "
+                f"{LINUX_AUTOSTART}"
+            )
+        if LINUX_AUTOSTART.exists():
+            if not _is_our_linux_entry():
+                raise ValueError(
+                    f"Отказываюсь удалять неизвестный файл автозапуска: "
+                    f"{LINUX_AUTOSTART}"
+                )
+            LINUX_AUTOSTART.unlink()
     else:
         import winreg
         try:

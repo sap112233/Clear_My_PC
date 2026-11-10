@@ -30,7 +30,7 @@ jobs:
       run: python -m unittest discover -v
     
     - name: Build with PyInstaller
-      run: pyinstaller --onefile --windowed --name DesktopKeeper --hidden-import=config --hidden-import=utils --hidden-import=organization --hidden-import=platform_tools --hidden-import=screenshot_handler --hidden-import=app_handler --hidden-import=file_sorter --hidden-import=categories --hidden-import=autostart --hidden-import=notify --hidden-import=updater --hidden-import=version gui.py
+      run: pyinstaller --onefile --windowed --name DesktopKeeper --hidden-import=config --hidden-import=utils --hidden-import=organization --hidden-import=platform_tools --hidden-import=screenshot_handler --hidden-import=app_handler --hidden-import=file_sorter --hidden-import=categories --hidden-import=autostart --hidden-import=background_monitor --hidden-import=notify --hidden-import=updater --hidden-import=version gui.py
     
     - name: Upload Windows artifact
       uses: actions/upload-artifact@v4
@@ -70,6 +70,7 @@ jobs:
           --hidden-import=file_sorter \
           --hidden-import=categories \
           --hidden-import=autostart \
+          --hidden-import=background_monitor \
           --hidden-import=notify \
           --hidden-import=updater \
           --hidden-import=version \
@@ -86,8 +87,55 @@ jobs:
         name: DesktopKeeper-macOS
         path: DesktopKeeper-macOS.tar.gz
 
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Linux GUI dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-venv python3-tk
+
+    - name: Install Python dependencies
+      run: |
+        python3 -m venv .venv
+        .venv/bin/python -m pip install --upgrade pip
+        .venv/bin/python -m pip install -r requirements.txt
+
+    - name: Run tests
+      run: .venv/bin/python -m unittest discover -v
+
+    - name: Build with PyInstaller
+      run: |
+        .venv/bin/pyinstaller --onefile --windowed --name DesktopKeeper \
+          --hidden-import=config \
+          --hidden-import=utils \
+          --hidden-import=organization \
+          --hidden-import=platform_tools \
+          --hidden-import=screenshot_handler \
+          --hidden-import=app_handler \
+          --hidden-import=file_sorter \
+          --hidden-import=categories \
+          --hidden-import=autostart \
+          --hidden-import=background_monitor \
+          --hidden-import=notify \
+          --hidden-import=updater \
+          --hidden-import=version \
+          gui.py
+
+    - name: Package executable
+      run: tar -czf DesktopKeeper-Linux.tar.gz -C dist DesktopKeeper
+
+    - name: Upload Linux artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DesktopKeeper-Linux
+        path: DesktopKeeper-Linux.tar.gz
+
   create-release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     
     steps:
@@ -108,6 +156,12 @@ jobs:
       with:
         name: DesktopKeeper-macOS
         path: .
+
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: DesktopKeeper-Linux
+        path: .
     
     - name: Create Release
       uses: softprops/action-gh-release@v1
@@ -115,6 +169,7 @@ jobs:
         files: |
           DesktopKeeper.exe
           DesktopKeeper-macOS.tar.gz
+          DesktopKeeper-Linux.tar.gz
         tag_name: v${{ steps.ver.outputs.version }}
         name: DesktopKeeper v${{ steps.ver.outputs.version }}
         draft: false

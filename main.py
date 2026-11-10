@@ -35,6 +35,19 @@ def load_user_settings() -> dict:
         raise ValueError("Имена рабочих папок должны быть строками.")
     settings.setdefault("layout_mode", "automatic")
     settings.setdefault("locations", {})
+    settings.setdefault("screenshot_retention_minutes", 0)
+    settings["screenshot_retention_minutes"] = shots.validate_retention_minutes(
+        settings["screenshot_retention_minutes"]
+    )
+    settings["excluded_folders"] = [
+        str(path)
+        for path in organization.validate_excluded_folders(
+            settings.setdefault("excluded_folders", [])
+        )
+    ]
+    config.EXCLUDED_FOLDERS = [
+        Path(path) for path in settings["excluded_folders"]
+    ]
     settings.setdefault("custom_file_types", {})
     settings["custom_file_types"] = organization.validate_custom_file_types(
         settings["custom_file_types"], sorter.TYPE_MAP
@@ -49,6 +62,7 @@ def load_user_settings() -> dict:
         not isinstance(item, str) for item in settings["enabled_types"]
     ):
         raise ValueError("Список типов файлов должен быть массивом строк.")
+    organization.migrate_enabled_file_types(settings)
     available_types = (
         set(sorter.TYPE_MAP) | set(settings["custom_file_types"]) | {"Другое"}
     )
@@ -70,6 +84,8 @@ class ShotWatcher(FileSystemEventHandler):
 
     def on_created(self, event):
         p = Path(event.src_path)
+        if organization.is_excluded_path(p, config.EXCLUDED_FOLDERS):
+            return
         if not shots.is_screenshot(p):
             return
         if not utils.wait_stable(p):
@@ -77,10 +93,17 @@ class ShotWatcher(FileSystemEventHandler):
         destination = utils.unique_dst(
             config.MUSOR / shots.build_name(p, "", "")
         )
+        if organization.is_excluded_path(destination, config.EXCLUDED_FOLDERS):
+            print(f"Пропускаю скриншот: папка назначения защищена: {destination.parent}")
+            return
         print(f"\nПредпросмотр нового скриншота:\n  {p} → {destination}")
         if input("Разрешить перемещение? [y/N] ").strip().lower() != "y":
             print("Оставляю файл на месте.")
             return
+        if organization.is_excluded_path(p, config.EXCLUDED_FOLDERS) or organization.is_excluded_path(
+            destination, config.EXCLUDED_FOLDERS
+        ):
+            raise ValueError("Скриншот или его назначение попадает в защищённую папку.")
         dst = utils.logged_move(p, destination, self.history, allow_unique=False)
         utils.save_json(config.HISTORY_PATH, self.history)
         print(f"[shot] {p.name}  →  {dst.name}")
@@ -89,10 +112,15 @@ class ShotWatcher(FileSystemEventHandler):
 def watch(history: list) -> None:
     obs = Observer()
     folders = dict.fromkeys(
-        folder.resolve() for folder in (config.DESKTOP, config.MUSOR)
+        folder.resolve()
+        for folder in (config.DESKTOP, config.MUSOR)
+        if folder.is_dir()
+        and not organization.is_excluded_path(folder, config.EXCLUDED_FOLDERS)
     )
+    if not folders:
+        print("Нет доступных существующих папок для мониторинга. Папки не создавались.")
+        return
     for folder in folders:
-        folder.mkdir(parents=True, exist_ok=True)
         obs.schedule(ShotWatcher(history), str(folder), recursive=False)
     obs.start()
     print("Мониторинг включён. Ctrl-C — стоп.")

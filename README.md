@@ -1,6 +1,6 @@
 # DesktopKeeper
 
-Automatic desktop organizer for macOS and Windows that keeps your workspace clean without manual effort.
+Automatic desktop organizer for macOS and Windows, with initial Linux support.
 
 ![Build Status](https://github.com/sap112233/Clear_My_PC/actions/workflows/build.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -14,28 +14,35 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 - Automatically renames screenshots with meaningful names (application name + window title + timestamp)
 - Moves screenshots to a dedicated folder with clean naming convention
 - Real-time monitoring: each new screenshot is previewed and requires approval before moving
+- Optional retention timer moves expired screenshots to a private, reversible archive (disabled by default)
+- Optional background monitoring can notify about detected new apps/installers after permission is enabled; detected items are revalidated before follow-up
+- Optional installer timer starts only after a matching newly installed app is detected and moves the installer to the reversible archive
 
 ### 📁 Intelligent File Organization
-- Sorts files by type into categorized folders (Images, Videos, Documents, Code, Archives, etc.)
+- Sorts files by type into categorized folders (Images, Graphic Projects, Videos, Documents, Code, Archives, etc.)
+- Keeps SVG and common vector/design project files in a separate Graphic Projects folder
 - Choose automatic Desktop folders or select separate destination folders inside your user home
+- Protect selected folders so scans, moves, and rollbacks leave them untouched
 - Enable only the file types you want, or add custom extension-to-folder rules
 - Prevents path traversal and avoids overwriting existing destinations
 
 ### 🔗 Application Shortcuts by Category
 - Creates shortcuts/aliases for applications organized by category (Browsers, Social, Programming, Games, etc.)
+- Scans nested application groups inside standard macOS Applications folders and nested Windows Start Menu folders
 - Assign categories to installed applications and adjust individual choices in the action preview
 - Reclassify existing shortcuts through a previewed, reversible move
 - Remembers application category choices for future scans
 - Organizes shortcuts only; installed application bundles are never moved
 
 ### 🗑️ Automatic Cleanup
-- Finds installers (.dmg, .pkg, .exe, .msi) after successful installation
+- Finds common installers (.dmg, .pkg, .exe, .msi, .deb, .rpm, .AppImage, .zip)
 - Moves installers to a private, reversible quarantine instead of deleting them
 - Selectively rolls back individual actions or all reversible recorded changes
 
 ### 🖥️ Cross-Platform
 - **macOS**: Full integration with Finder aliases, AppleScript automation, LaunchAgent for autostart
 - **Windows**: Native shortcuts (.lnk), Registry-based autostart, PowerShell notifications
+- **Linux (initial support)**: Scans standard XDG application-entry folders, creates categorized `.desktop` launcher copies, supports XDG autostart, and uses `notify-send` for system notifications when installed. System screenshot-location integration is not yet available.
 
 ## Installation
 
@@ -43,17 +50,30 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 Grab the latest release for your platform:
 - **Windows**: `DesktopKeeper.exe` (single executable, no Python required)
 - **macOS**: `DesktopKeeper.app` or `DesktopKeeper` (standalone binary)
+- **Linux**: `DesktopKeeper-Linux.tar.gz` (built on Ubuntu 22.04; extract and run `DesktopKeeper`. Compatibility with older distributions depends on their system libraries. System screenshot-location integration is not available.)
 
 Download from [Releases](https://github.com/sap112233/Clear_My_PC/releases)
 
 ### First Run
 1. Launch the application
-2. Follow the onboarding wizard (4 steps)
+2. Follow the onboarding wizard, choose a screenshot destination, or leave screenshots in place
+   (destination folders are created only after you confirm an action)
 3. Grant necessary permissions:
    - **macOS**: Allow access to Desktop, Downloads, and Automation
    - **Windows**: Allow through SmartScreen if prompted
 4. Click "Scan System" to preview proposed actions
 5. Review and apply selected actions
+6. Enable "Background monitoring" only if you want DesktopKeeper to watch existing Desktop, Downloads, and application directories. The app asks before enabling and saves this permission for next launch; autostart is a separate opt-in.
+
+Installer auto-archiving is disabled by default. Choose a delay in Settings; after a newly detected app matches a downloaded installer, that installer is moved to the private reversible archive when the delay expires. Protected folders, missing files, and installers no longer matching an installed app are skipped. The automatic match uses the installer filename and app display name; it is deliberately conservative and cannot prove which installer actually installed an app.
+
+### Platform and monitoring limitations
+- Background watching is opt-in and runs only while DesktopKeeper is running in the signed-in user's session. It is not a system daemon and cannot watch while the computer is off, the user is logged out, or the app is closed. Enable autostart separately if you want it to start at login.
+- Monitoring covers existing standard Desktop, Downloads, and OS application/Start Menu locations. It does not observe every package manager, browser cache, custom install path, removable drive, or application registry. A notification is best-effort, not proof that an installation completed.
+- New app detection is based on supported launchers/bundles: macOS `.app` bundles, Windows Start Menu `.lnk` shortcuts, and Linux XDG `.desktop` entries. Apps installed outside those locations may not be detected.
+- Screenshot detection watches the Desktop and configured screenshot destination and recognizes common filename prefixes and image extensions. It cannot reliably identify screenshots saved elsewhere or screenshots with custom names.
+- Linux screenshot save-location control varies by desktop environment and capture app and is not changed by DesktopKeeper. Linux app organization is initial XDG `.desktop` support; `notify-send` and `gio` must be available for their respective integrations.
+- Installer timers move matching files only into the local reversible archive; they do not uninstall applications or permanently erase files. Keep the timer off if filename-based matching is not appropriate for your installers.
 
 ## Usage
 
@@ -75,6 +95,7 @@ Download from [Releases](https://github.com/sap112233/Clear_My_PC/releases)
 Settings are stored in:
 - **macOS**: `~/.desktop-keeper/config.json`
 - **Windows**: `%USERPROFILE%\.desktop-keeper\config.json`
+- **Linux**: `~/.desktop-keeper/config.json`
 
 You can customize:
 - Automatic Desktop folder names or separate destinations inside your user home folder
@@ -94,7 +115,7 @@ DesktopKeeper checks for updates once per day. When a new version is available, 
 ## Development
 
 ### Requirements
-- Python 3.12+
+- Python 3.9+
 - `pip install -r requirements.txt`
 
 ### Run Locally
@@ -115,7 +136,7 @@ pyinstaller --onefile --windowed --name DesktopKeeper gui.py
 
 ### GitHub Actions
 The repository includes automated CI/CD:
-- Every push triggers builds for Windows (.exe) and macOS (.app)
+- Every push triggers builds for Windows (.exe), macOS (.app), and Linux (tar.gz)
 - Releases are created automatically with version tags
 - Binaries are uploaded to GitHub Releases
 

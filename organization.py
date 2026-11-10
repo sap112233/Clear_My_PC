@@ -7,11 +7,31 @@ from pathlib import Path
 import utils
 
 LOCATION_KEYS = ("screenshots", "files", "apps")
+FILE_TYPE_MIGRATION_VERSION = 1
 DEFAULT_FOLDER_NAMES = {
     "screenshots": "мусор",
     "files": "Файлы",
     "apps": "Apps",
 }
+
+
+def migrate_enabled_file_types(settings: dict) -> None:
+    version = settings.get("file_type_migrations", 0)
+    if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+        raise ValueError("Версия настроек типов файлов задана неверно.")
+    if version >= FILE_TYPE_MIGRATION_VERSION:
+        return
+
+    enabled_types = settings.get("enabled_types", [])
+    if not isinstance(enabled_types, list):
+        raise ValueError("Список типов файлов должен быть массивом.")
+    if (
+        "enabled_types" in settings
+        and "Изображения" in enabled_types
+        and "Графические проекты" not in enabled_types
+    ):
+        enabled_types.append("Графические проекты")
+    settings["file_type_migrations"] = FILE_TYPE_MIGRATION_VERSION
 
 
 def validate_custom_root(value: str, home: Path) -> Path:
@@ -68,6 +88,69 @@ def resolve_locations(
     if len(set(normalized)) != len(normalized):
         raise ValueError("Папки скриншотов, файлов и приложений должны различаться.")
     return paths
+
+
+def configure_screenshot_folder(
+    cfg: dict,
+    choice: str,
+    selected_folder: str | None,
+    desktop: Path,
+    home: Path,
+) -> None:
+    if choice == "leave":
+        cfg["features"]["screenshots"] = False
+        return
+    if choice == "desktop":
+        return
+    if choice != "existing":
+        raise ValueError("Выбери папку для скриншотов.")
+    if not selected_folder:
+        raise ValueError("Выбери существующую папку для скриншотов.")
+
+    screenshot_root = validate_custom_root(selected_folder, home)
+    if not screenshot_root.is_dir():
+        raise ValueError(f"Папка для скриншотов не существует: {screenshot_root}")
+
+    if cfg.get("layout_mode", "automatic") == "automatic":
+        paths = default_locations(desktop, cfg.get("folders", {}))
+    else:
+        paths = resolve_locations(cfg, desktop, home)
+    paths["screenshots"] = screenshot_root
+    cfg["layout_mode"] = "custom"
+    cfg["locations"] = {key: str(path) for key, path in paths.items()}
+    resolve_locations(cfg, desktop, home)
+
+
+def validate_excluded_folders(values: object) -> list[Path]:
+    if not isinstance(values, list):
+        raise ValueError("Список защищённых папок должен быть массивом.")
+
+    folders = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Путь защищённой папки не может быть пустым.")
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            raise ValueError(f"Путь защищённой папки должен быть абсолютным: {value}")
+        if path.is_symlink():
+            raise ValueError(f"Защищённую папку нельзя задавать через ссылку: {path}")
+        resolved = path.resolve()
+        if resolved == Path(resolved.anchor):
+            raise ValueError("Нельзя защищать корень диска вместо конкретной папки.")
+        key = str(resolved).casefold()
+        if key not in seen:
+            folders.append(resolved)
+            seen.add(key)
+    return folders
+
+
+def is_excluded_path(path: Path, excluded_folders: list[Path]) -> bool:
+    resolved = path.resolve()
+    return any(
+        resolved == excluded.resolve() or excluded.resolve() in resolved.parents
+        for excluded in excluded_folders
+    )
 
 
 def validate_custom_file_types(
@@ -134,12 +217,19 @@ def category_folder_name(category: str) -> str:
     return utils.sanitize(category)
 
 
-def app_destination(root: Path, category: str, app_name: str, is_mac: bool) -> Path:
+def app_destination(
+    root: Path,
+    category: str,
+    app_name: str,
+    is_mac: bool,
+    is_linux: bool = False,
+) -> Path:
     destination = utils.safe_child_path(
         root, category_folder_name(category), utils.sanitize(app_name)
     )
     if not is_mac:
-        destination = destination.with_name(f"{destination.name}.lnk")
+        extension = ".desktop" if is_linux else ".lnk"
+        destination = destination.with_name(f"{destination.name}{extension}")
     return destination
 
 

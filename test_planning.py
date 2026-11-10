@@ -32,6 +32,20 @@ def configuration(home: Path) -> dict:
 
 
 class PlanningTests(unittest.TestCase):
+    def test_application_sources_can_be_nested_beneath_standard_app_roots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Applications"
+            nested_app = root / "Utilities" / "Example.app"
+            nested_app.mkdir(parents=True)
+
+            gui.validate_action_source(
+                nested_app, [root], direct_child=False
+            )
+            with self.assertRaisesRegex(ValueError, "вне разрешённых"):
+                gui.validate_action_source(
+                    nested_app, [root], direct_child=True
+                )
+
     def test_gui_and_cli_load_legacy_defaults_without_losing_categories(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home = Path(temp_dir)
@@ -54,6 +68,11 @@ class PlanningTests(unittest.TestCase):
             self.assertIn("Другое", gui_settings["categories"])
             self.assertEqual(cli_settings["layout_mode"], "automatic")
             self.assertEqual(gui.config.APPS_ROOT, (desktop / "Apps").resolve())
+            self.assertEqual(gui_settings["screenshot_retention_minutes"], 0)
+            self.assertEqual(gui_settings["installer_retention_minutes"], 0)
+            self.assertFalse(gui_settings["background_monitoring"])
+            self.assertEqual(gui_settings["pending_installer_cleanup"], [])
+            self.assertEqual(cli_settings["screenshot_retention_minutes"], 0)
 
     def test_gui_restores_saved_theme_and_rejects_unknown_theme(self):
         with tempfile.TemporaryDirectory() as temp_dir:
