@@ -26,8 +26,15 @@ import platform_tools as pt
 import screenshot_handler as shots
 import utils
 
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
+
+ACCENT = "#6036D9"
+ACCENT_HOVER = "#5128C7"
+TEXT = "#171923"
+MUTED = "#71809A"
+SURFACE = "#FFFFFF"
+BACKGROUND = "#F2F3F7"
 
 DEFAULT_CATEGORIES = {
     "Браузеры": ["Chrome", "Firefox", "Safari", "Brave", "Arc", "Tor Browser"],
@@ -895,62 +902,304 @@ class Main(ctk.CTk):
         self.actions: list[dict] = []
         self.history = history
         self.observer = None
-        self.preview_window = None
-        self.preview_apply_btn = None
         self.pending_shots: list[Path] = []
         self.shot_preview_window = None
         self.title("DesktopKeeper")
-        self.geometry("760x620")
+        self.geometry("1180x760")
+        self.minsize(860, 600)
+        self.configure(fg_color=BACKGROUND)
 
-        top = ctk.CTkFrame(self, fg_color="transparent")
-        top.pack(fill="x", padx=14, pady=(14, 6))
-        self.btn_scan = ctk.CTkButton(top, text="Сканировать систему", command=self.scan)
-        self.btn_scan.pack(side="left")
-        ToolTip(self.btn_scan, "Один проход по рабочему столу, загрузкам и приложениям:\nпокажу список действий с галочками")
-        self.btn_apply = ctk.CTkButton(top, text="Предпросмотр действий (0)",
-                                       state="disabled", command=self.show_preview)
-        self.btn_apply.pack(side="left", padx=8)
-        ToolTip(self.btn_apply, "Открой список действий, выбери разрешённые и подтверди применение")
-        self.btn_undo = ctk.CTkButton(top, text="Откатить действия",
-                                      fg_color="#7a3b3b", command=self.undo)
-        self.btn_undo.pack(side="left")
-        ToolTip(self.btn_undo, "Выбери отдельные действия или откати все доступные изменения")
+        sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color="#F8F8FB")
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
 
-        mid = ctk.CTkFrame(self, fg_color="transparent")
-        mid.pack(fill="x", padx=14)
-        self.mon = ctk.CTkSwitch(mid, text="Мониторинг скринов", command=self.toggle_watch)
-        self.mon.pack(side="left")
-        ToolTip(self.mon, "Для каждого нового скриншота сначала показывается запрос на перемещение")
-        self.auto = ctk.CTkSwitch(mid, text="Автозапуск", command=self.toggle_autostart)
-        self.auto.pack(side="left", padx=12)
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.pack(fill="x", padx=18, pady=(22, 26))
+        ctk.CTkLabel(
+            brand, text="D", width=44, height=44, corner_radius=14,
+            fg_color=ACCENT, text_color="#FFFFFF", font=("", 22, "bold"),
+        ).pack(side="left")
+        ctk.CTkLabel(
+            brand, text="DesktopKeeper", text_color=TEXT, font=("", 16, "bold"),
+        ).pack(side="left", padx=12)
+
+        self.nav_buttons = {}
+        self._add_nav(sidebar, "scan", "⌕  Сканирование", self.scan)
+        self._add_nav(sidebar, "categories", "▦  Категории", self.edit_categories)
+        self._add_nav(sidebar, "history", "↶  История", self.undo)
+        self._add_nav(
+            sidebar, "settings", "⚙  Настройки",
+            lambda: SettingsWindow(self, self.cfg, self.settings_saved),
+        )
+        self._add_nav(sidebar, "apps", "▣  Приложения", self.edit_app_assignments)
+        self._add_nav(sidebar, "help", "?  Справка", self.show_help)
+        self._set_active_nav("scan")
+
+        ctk.CTkFrame(sidebar, height=1, fg_color="#E2E2E8").pack(
+            side="bottom", fill="x", padx=18, pady=(0, 14)
+        )
+        self.auto = ctk.CTkSwitch(
+            sidebar, text="Автозапуск", command=self.toggle_autostart,
+            progress_color=ACCENT, button_color=ACCENT,
+            button_hover_color=ACCENT_HOVER,
+        )
+        self.auto.pack(side="bottom", anchor="w", padx=22, pady=(0, 20))
         if autostart.is_enabled():
             self.auto.select()
         ToolTip(self.auto, "Запускать DesktopKeeper при входе в систему")
-        ctk.CTkButton(mid, text="Категории", width=100, fg_color="#3a3a3a",
-                      command=self.edit_categories).pack(side="right", padx=4)
-        ctk.CTkButton(
-            mid,
-            text="Папки и типы",
-            width=115,
-            fg_color="#3a3a3a",
-            command=lambda: SettingsWindow(self, self.cfg, self.settings_saved),
-        ).pack(side="right", padx=4)
-        ctk.CTkButton(
-            mid,
-            text="Приложения",
-            width=100,
-            fg_color="#3a3a3a",
-            command=self.edit_app_assignments,
-        ).pack(side="right", padx=4)
-        ctk.CTkButton(mid, text="Справка", width=90, fg_color="#3a3a3a",
-                      command=self.show_help).pack(side="right")
+        self.monitor_status = ctk.CTkLabel(
+            sidebar, text="●  Мониторинг выключен", text_color=MUTED,
+            font=("", 12),
+        )
+        self.monitor_status.pack(side="bottom", anchor="w", padx=22, pady=(0, 8))
+        self.mon = ctk.CTkSwitch(
+            sidebar, text="Мониторинг скриншотов", command=self.toggle_watch,
+            progress_color=ACCENT, button_color=ACCENT,
+            button_hover_color=ACCENT_HOVER,
+        )
+        self.mon.pack(side="bottom", anchor="w", padx=22, pady=(0, 12))
+        ToolTip(self.mon, "Для каждого нового скриншота сначала показывается запрос на перемещение")
 
-        self.status = ctk.CTkLabel(self, text="Нажми «Сканировать систему»", anchor="w")
-        self.status.pack(fill="x", padx=16, pady=(6, 2))
+        content = ctk.CTkFrame(self, fg_color="transparent")
+        content.pack(side="left", fill="both", expand=True, padx=38, pady=(28, 22))
 
-        self.list = ctk.CTkScrollableFrame(self, label_text="Предлагаемые действия")
-        self.list.pack(fill="both", expand=True, padx=14, pady=(4, 14))
+        header = ctk.CTkFrame(content, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 26))
+        heading = ctk.CTkFrame(header, fg_color="transparent")
+        heading.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            heading, text="Сканирование", text_color=TEXT,
+            font=("", 25, "bold"),
+        ).pack(anchor="w")
+        self.scan_summary = ctk.CTkLabel(
+            heading, text="Запусти проверку, чтобы увидеть файлы для уборки",
+            text_color=MUTED, font=("", 14),
+        )
+        self.scan_summary.pack(anchor="w", pady=(5, 0))
+        self.btn_scan = ctk.CTkButton(
+            header, text="Сканировать", width=188, height=46,
+            corner_radius=13, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=("", 14, "bold"), command=self.scan,
+        )
+        self.btn_scan.pack(side="right", padx=(18, 0))
+        ToolTip(self.btn_scan, "Проверить рабочий стол, загрузки и приложения")
+
+        stats = ctk.CTkFrame(content, fg_color="transparent")
+        stats.pack(fill="x", pady=(0, 22))
+        self.stat_values = {}
+        for key, title, caption in (
+            ("screenshots", "Скриншоты", "Скриншоты"),
+            ("installers", "Установщики", "Установщики"),
+            ("files", "Файлы для сортировки", "Файлы"),
+        ):
+            card = ctk.CTkFrame(
+                stats, fg_color=SURFACE, corner_radius=18,
+                border_width=1, border_color="#E6E5EA",
+            )
+            card.pack(side="left", fill="x", expand=True, padx=(0, 14))
+            ctk.CTkLabel(
+                card, text="0", text_color=TEXT, font=("", 22, "bold"),
+            ).pack(anchor="w", padx=18, pady=(13, 0))
+            value = card.winfo_children()[-1]
+            detail = ctk.CTkLabel(
+                card, text=f"{caption} · 0 Б", text_color=MUTED,
+                font=("", 12),
+            )
+            detail.pack(anchor="w", padx=18, pady=(0, 13))
+            self.stat_values[key] = (value, detail)
+
+        self.list = ctk.CTkScrollableFrame(
+            content, fg_color="transparent", corner_radius=0,
+        )
+        self.list.pack(fill="both", expand=True)
+        self.status = ctk.CTkLabel(
+            content, text="Ничего не изменится без твоего подтверждения",
+            anchor="w", text_color=MUTED, font=("", 12),
+        )
+        self.status.pack(fill="x", pady=(10, 10))
+
+        footer = ctk.CTkFrame(content, fg_color="transparent")
+        footer.pack(fill="x")
+        self.btn_apply = ctk.CTkButton(
+            footer, text="Применить (0)", width=216, height=44,
+            corner_radius=12, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=("", 14, "bold"), state="disabled", command=self.apply,
+        )
+        self.btn_apply.pack(side="left")
+        self.btn_undo = ctk.CTkButton(
+            footer, text="Откатить последнее", height=44,
+            fg_color="transparent", hover_color="#E8E8ED",
+            text_color=MUTED, font=("", 13, "bold"), command=self.undo,
+        )
+        self.btn_undo.pack(side="left", padx=(18, 0))
+        self.last_scan = None
+        self._show_empty_state()
         self.after(1500, self.schedule_update_check)
+
+    def _add_nav(self, parent, key, text, command):
+        def navigate():
+            self._set_active_nav(key)
+            command()
+
+        button = ctk.CTkButton(
+            parent, text=text, height=38, anchor="w", corner_radius=11,
+            fg_color="transparent", hover_color="#ECEAF3", text_color=MUTED,
+            font=("", 13, "bold"), command=navigate,
+        )
+        button.pack(fill="x", padx=18, pady=3)
+        self.nav_buttons[key] = button
+
+    def _set_active_nav(self, selected):
+        for key, button in self.nav_buttons.items():
+            active = key == selected
+            button.configure(
+                fg_color="#E5DDF8" if active else "transparent",
+                text_color=ACCENT if active else MUTED,
+            )
+
+    def _show_empty_state(self):
+        for widget in self.list.winfo_children():
+            widget.destroy()
+        ctk.CTkLabel(
+            self.list, text="Пока всё чисто", text_color=TEXT,
+            font=("", 19, "bold"),
+        ).pack(pady=(78, 6))
+        ctk.CTkLabel(
+            self.list,
+            text="Нажми «Сканировать» — покажу, что можно безопасно разложить.",
+            text_color=MUTED, font=("", 13),
+        ).pack(pady=(0, 24))
+
+    @staticmethod
+    def _action_group(action):
+        if action["kind"] == "trash":
+            return "installers"
+        if action.get("_destination_root") == "screenshots":
+            return "screenshots"
+        if action.get("_destination_root") == "files":
+            return "files"
+        return "apps"
+
+    @staticmethod
+    def _format_size(size):
+        units = ("Б", "КБ", "МБ", "ГБ", "ТБ")
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.0f} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+            value /= 1024
+
+    def _render_actions(self):
+        for widget in self.list.winfo_children():
+            widget.destroy()
+        if not self.actions:
+            self._show_empty_state()
+            return
+
+        groups = (
+            ("screenshots", "Скриншоты", "▧"),
+            ("installers", "Установщики", "▣"),
+            ("files", "Файлы для сортировки", "▤"),
+            ("apps", "Приложения", "◈"),
+        )
+        for key, title, icon in groups:
+            actions = [item for item in self.actions if self._action_group(item) == key]
+            if not actions:
+                continue
+            card = ctk.CTkFrame(
+                self.list, fg_color=SURFACE, corner_radius=18,
+                border_width=1, border_color="#E6E5EA",
+            )
+            card.pack(fill="x", pady=(0, 12))
+            heading = ctk.CTkFrame(card, fg_color="transparent")
+            heading.pack(fill="x", padx=18, pady=(9, 6))
+            ctk.CTkLabel(
+                heading, text=title, text_color=TEXT, font=("", 13, "bold"),
+            ).pack(side="left")
+            badge = ctk.CTkLabel(
+                heading, text="", corner_radius=10, fg_color="#E9E1FA",
+                text_color=ACCENT, font=("", 10, "bold"), padx=10, pady=2,
+            )
+            badge.pack(side="right")
+            for index, action in enumerate(actions):
+                row = ctk.CTkFrame(
+                    card, fg_color="transparent", corner_radius=0,
+                )
+                row.pack(fill="x", padx=12)
+                if index:
+                    ctk.CTkFrame(row, height=1, fg_color="#ECECF0").pack(
+                        fill="x", side="top",
+                    )
+                line = ctk.CTkFrame(row, fg_color="transparent")
+                line.pack(fill="x", padx=4, pady=7)
+                ctk.CTkCheckBox(
+                    line, text="", variable=action["var"], width=22,
+                    checkbox_width=19, checkbox_height=19,
+                    fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                    command=self.refresh_count,
+                ).pack(side="left", padx=(0, 10))
+                ctk.CTkLabel(
+                    line, text=icon, width=28, height=28, corner_radius=7,
+                    fg_color="#F0F0F3", text_color="#737B8C",
+                    font=("", 14, "bold"),
+                ).pack(side="left", padx=(0, 12))
+                ctk.CTkLabel(
+                    line, text=action["src"].name, text_color=TEXT,
+                    anchor="w", font=("", 12),
+                ).pack(side="left", fill="x", expand=True)
+                if action["kind"] in {"alias", "alias_move"}:
+                    ctk.CTkOptionMenu(
+                        line, values=action["category_options"],
+                        variable=ctk.StringVar(value=action["_category"]),
+                        width=135, height=28, fg_color="#F0EDF8",
+                        button_color="#E5DDF8", button_hover_color="#DAD0F2",
+                        text_color=ACCENT,
+                        command=lambda value, selected=action: self.update_app_category(
+                            selected, value
+                        ),
+                    ).pack(side="right", padx=(8, 10))
+                destination = ctk.CTkLabel(
+                    line, text=f"→ {action['dst'].parent.name}",
+                    text_color=MUTED, anchor="e", width=120, font=("", 11),
+                )
+                destination.pack(side="right", padx=(8, 4))
+                action["_labels"] = [destination]
+                try:
+                    info = action["src"].stat()
+                    action["_size"] = info.st_size if action["src"].is_file() else None
+                except OSError:
+                    action["_size"] = None
+            action["_badge"] = badge
+        self.refresh_count()
+
+    def _refresh_stats(self):
+        groups = ("screenshots", "installers", "files")
+        captions = {
+            "screenshots": "Скриншотов",
+            "installers": "Установщиков",
+            "files": "Файлов",
+        }
+        for key in groups:
+            selected = [
+                action for action in self.actions
+                if self._action_group(action) == key and action["var"].get()
+            ]
+            total = sum(
+                action.get("_size") or 0
+                for action in selected
+                if action.get("_size") is not None
+            )
+            value, detail = self.stat_values[key]
+            value.configure(text=str(len(selected)))
+            detail.configure(text=f"{captions[key]} · {self._format_size(total)}")
+        for action in self.actions:
+            badge = action.get("_badge")
+            if badge:
+                selected = sum(item["var"].get() for item in self.actions
+                               if self._action_group(item) == self._action_group(action))
+                total = sum(self._action_group(item) == self._action_group(action)
+                            for item in self.actions)
+                badge.configure(text=f"{selected} / {total}")
 
     def settings_saved(self):
         self.status.configure(text="Настройки сохранены. Новые назначения будут показаны при следующем сканировании.")
@@ -976,38 +1225,48 @@ class Main(ctk.CTk):
 
     # ---------- скан и предпросмотр ----------
     def scan(self):
+        self._set_active_nav("scan")
         self.status.configure(text="Сканирую…")
         self.update_idletasks()
         self.actions = []
-        self.btn_apply.configure(state="disabled", text="Предпросмотр действий (0)")
-        for w in self.list.winfo_children():
-            w.destroy()
+        self.btn_apply.configure(state="disabled", text="Применить (0)")
+        self._show_empty_state()
         try:
             self.actions = build_actions(self.cfg, self.history)
         except (OSError, TypeError, ValueError) as exc:
             self.status.configure(text="Не удалось безопасно подготовить предпросмотр.")
+            self.scan_summary.configure(text="Сканирование не удалось")
+            self._refresh_stats()
             messagebox.showerror("Ошибка предпросмотра", str(exc), parent=self)
+            self.after_idle(self.show_next_screenshot_preview)
             return
+        self.last_scan = datetime.now()
         if not self.actions:
             self.status.configure(text="Порядок: действий нет.")
-            self.btn_apply.configure(state="disabled", text="Предпросмотр действий (0)")
+            self.scan_summary.configure(
+                text=f"Последняя проверка: сегодня в {self.last_scan:%H:%M} · новых действий нет"
+            )
+            self._refresh_stats()
+            self._render_actions()
+            self.after_idle(self.show_next_screenshot_preview)
             return
         for a in self.actions:
             a["var"] = ctk.BooleanVar(value=True)
-            ctk.CTkLabel(self.list, text=a["desc"], anchor="w").pack(
-                anchor="w", padx=10, pady=3
-            )
-            a["_labels"] = [self.list.winfo_children()[-1]]
+        self._render_actions()
         self.refresh_count()
-        self.status.configure(text=f"Подготовлено действий: {len(self.actions)}. Проверь отдельное окно предпросмотра.")
-        self.show_preview()
+        self.scan_summary.configure(
+            text=f"Последняя проверка: сегодня в {self.last_scan:%H:%M} · найдено {len(self.actions)} объектов"
+        )
+        self.status.configure(
+            text="Проверь выбранные действия — ничего не изменится без подтверждения."
+        )
 
     def refresh_count(self):
         n = sum(1 for a in self.actions if a["var"].get())
-        self.btn_apply.configure(state="normal" if n else "disabled",
-                                 text=f"Предпросмотр действий ({n})")
-        if self.preview_apply_btn:
-            self.preview_apply_btn.configure(state="normal" if n else "disabled")
+        self.btn_apply.configure(
+            state="normal" if n else "disabled", text=f"Применить ({n})",
+        )
+        self._refresh_stats()
 
     def update_app_category(self, action: dict, category: str):
         if category not in action["category_options"]:
@@ -1027,7 +1286,7 @@ class Main(ctk.CTk):
             action["var"].set(False)
             action["desc"] = f"Ярлык уже находится в категории «{category}»: {destination}"
             for label in action.get("_labels", []):
-                label.configure(text=action["desc"])
+                label.configure(text=f"Уже в «{category}»")
             self.refresh_count()
             return
         if (
@@ -1044,83 +1303,8 @@ class Main(ctk.CTk):
         verb = "Переместить ярлык" if action["kind"] == "alias_move" else "Создать ярлык"
         action["desc"] = f"{verb}: {action['src']}  →  {destination}"
         for label in action.get("_labels", []):
-            label.configure(text=action["desc"])
+            label.configure(text=f"→ {destination.parent.name}")
         self.refresh_count()
-
-    def show_preview(self):
-        if not self.actions:
-            return
-        if self.preview_window and self.preview_window.winfo_exists():
-            self.preview_window.focus_force()
-            return
-
-        win = ctk.CTkToplevel(self)
-        self.preview_window = win
-        win.title("Предпросмотр действий")
-        win.geometry("760x520")
-        win.transient(self)
-        win.grab_set()
-        ctk.CTkLabel(
-            win,
-            text="Ничего не изменится, пока ты не подтвердишь выбранные действия.",
-            anchor="w",
-        ).pack(fill="x", padx=14, pady=(14, 6))
-        rows = ctk.CTkScrollableFrame(win, label_text="Предлагаемые действия")
-        rows.pack(fill="both", expand=True, padx=14, pady=6)
-        for action in self.actions:
-            row = ctk.CTkFrame(rows, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=3)
-            ctk.CTkCheckBox(
-                row,
-                text="",
-                variable=action["var"],
-                command=self.refresh_count,
-                width=24,
-            ).pack(side="left", padx=(0, 6))
-            if action["kind"] in {"alias", "alias_move"}:
-                ctk.CTkOptionMenu(
-                    row,
-                    values=action["category_options"],
-                    variable=ctk.StringVar(value=action["_category"]),
-                    width=150,
-                    command=lambda value, selected=action: self.update_app_category(
-                        selected, value
-                    ),
-                ).pack(side="left", padx=(0, 8))
-            ctk.CTkLabel(
-                row,
-                text=action["desc"],
-                justify="left",
-                anchor="w",
-                wraplength=670,
-            ).pack(side="left", fill="x", expand=True)
-            action.setdefault("_labels", []).append(row.winfo_children()[-1])
-        buttons = ctk.CTkFrame(win, fg_color="transparent")
-        buttons.pack(fill="x", padx=14, pady=(6, 14))
-        self.preview_apply_btn = ctk.CTkButton(
-            buttons,
-            text="Разрешить выбранное",
-            command=self.apply,
-        )
-        self.preview_apply_btn.pack(side="left")
-        ctk.CTkButton(
-            buttons,
-            text="Запретить всё",
-            fg_color="#7a3b3b",
-            command=self.cancel_preview,
-        ).pack(side="right")
-        win.protocol("WM_DELETE_WINDOW", self.cancel_preview)
-        self.refresh_count()
-
-    def cancel_preview(self):
-        if self.preview_window and self.preview_window.winfo_exists():
-            self.preview_window.destroy()
-        self.preview_window = None
-        self.preview_apply_btn = None
-        self.actions = []
-        self.btn_apply.configure(state="disabled", text="Предпросмотр действий (0)")
-        self.status.configure(text="Отменено. Никакие действия не выполнены.")
-        self.after_idle(self.show_next_screenshot_preview)
 
     # ---------- применение и откат ----------
     def apply(self):
@@ -1132,16 +1316,13 @@ class Main(ctk.CTk):
         try:
             done = apply_actions(self.actions, self.history, self.cfg)
         except (OSError, TypeError, ValueError) as exc:
-            messagebox.showerror("Ошибка применения", str(exc), parent=self.preview_window or self)
+            messagebox.showerror("Ошибка применения", str(exc), parent=self)
             return
-        if self.preview_window and self.preview_window.winfo_exists():
-            self.preview_window.destroy()
-        self.preview_window = None
-        self.preview_apply_btn = None
         self.actions = []
-        for w in self.list.winfo_children():
-            w.destroy()
-        self.btn_apply.configure(state="disabled", text="Предпросмотр действий (0)")
+        self._show_empty_state()
+        self._refresh_stats()
+        self.btn_apply.configure(state="disabled", text="Применить (0)")
+        self.scan_summary.configure(text="Сканирование завершено")
         if done == n:
             self.status.configure(text=f"Готово: выполнено {done} действий.")
             notify.notify(f"Уборка завершена: выполнено действий — {done}")
@@ -1158,9 +1339,7 @@ class Main(ctk.CTk):
         self.show_next_screenshot_preview()
 
     def show_next_screenshot_preview(self):
-        if (
-            self.preview_window and self.preview_window.winfo_exists()
-        ) or (
+        if self.actions or (
             self.shot_preview_window and self.shot_preview_window.winfo_exists()
         ):
             return
@@ -1393,10 +1572,16 @@ class Main(ctk.CTk):
                 folder.mkdir(parents=True, exist_ok=True)
                 self.observer.schedule(ShotWatcher(on_shot), str(folder), recursive=False)
             self.observer.start()
+            self.monitor_status.configure(
+                text="●  Мониторинг активен", text_color="#36A853",
+            )
             self.status.configure(text="Мониторинг включён.")
         elif self.observer:
             self.observer.stop()
             self.observer = None
+            self.monitor_status.configure(
+                text="●  Мониторинг выключен", text_color=MUTED,
+            )
             self.status.configure(text="Мониторинг выключен.")
 
     def toggle_autostart(self):
