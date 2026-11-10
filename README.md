@@ -14,13 +14,16 @@ Automatic desktop organizer for macOS and Windows that keeps your workspace clea
 
 ### 📁 Intelligent File Organization
 - Sorts files by type into categorized folders (Images, Videos, Documents, Code, Archives, etc.)
-- Customizable folder structure and file type mappings
-- Preserves folder hierarchy and prevents conflicts
+- Choose automatic Desktop folders or select separate destination folders inside your user home
+- Enable only the file types you want, or add custom extension-to-folder rules
+- Prevents path traversal and avoids overwriting existing destinations
 
 ### 🔗 Application Shortcuts by Category
 - Creates shortcuts/aliases for applications organized by category (Browsers, Social, Programming, Games, etc.)
-- Interactive categorization for unknown applications
-- Remembers your preferences for future use
+- Assign categories to installed applications and adjust individual choices in the action preview
+- Reclassify existing shortcuts through a previewed, reversible move
+- Remembers application category choices for future scans
+- Organizes shortcuts only; installed application bundles are never moved
 
 ### 🗑️ Automatic Cleanup
 - Finds installers (.dmg, .pkg, .exe, .msi) after successful installation
@@ -57,10 +60,11 @@ Download from [Releases](https://github.com/sap112233/Clear_My_PC/releases)
 - **Rollback Actions**: Restores selected files or all reversible recorded changes; generated shortcuts are archived, not permanently deleted
 - **Monitoring**: Preview and approve each new screenshot before it is moved
 - **Autostart**: Launch DesktopKeeper on system boot
+- **Folders and Types**: Select destinations, enable file groups, and define custom extension rules
 
 ### Categories
 - Add custom categories for applications
-- Interactive prompts for uncategorized apps
+- Use **Applications** to assign categories and the action preview to change or confirm placements
 - Editable through GUI or `config.json`
 
 ### Configuration
@@ -69,9 +73,9 @@ Settings are stored in:
 - **Windows**: `%USERPROFILE%\.desktop-keeper\config.json`
 
 You can customize:
-- Folder names (Trash, Apps, Files)
+- Automatic Desktop folder names or separate destinations inside your user home folder
 - Enabled features
-- File type mappings
+- Enabled file groups and custom extension-to-folder mappings
 - Application categories
 
 The local history, configuration, and quarantine are stored in `~/.desktop-keeper`
@@ -118,6 +122,7 @@ desktop-keeper/
 ├── app_handler.py          # Application detection and shortcuts
 ├── screenshot_handler.py   # Screenshot processing
 ├── file_sorter.py          # File type sorting
+├── organization.py         # Destination validation and classification rules
 ├── platform_tools.py       # Cross-platform utilities
 ├── updater.py              # GitHub Releases update checker
 ├── version.py              # Current version

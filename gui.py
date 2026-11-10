@@ -10,11 +10,10 @@ import subprocess
 import threading
 import uuid
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -22,6 +21,7 @@ import app_handler as apps
 import categories as cats
 import config
 import file_sorter as sorter
+import organization
 import platform_tools as pt
 import screenshot_handler as shots
 import utils
@@ -42,6 +42,7 @@ DEFAULT_CATEGORIES = {
     "Утилиты": ["CleanMyMac", "Unarchiver", "Alfred", "Keka", "AppCleaner", "Ollama", "LM Studio", "OneDrive", "AnyDesk"],
     "Анимация": ["After Effects", "Blender", "Motion"],
     "Apple приложения": ["Mail", "Calendar", "Maps", "FaceTime", "Photos"],
+    "Другое": [],
 }
 
 
@@ -61,11 +62,20 @@ def load_cfg() -> dict:
         "installers": True,
     }
     cfg.setdefault("features", dict(default_features))
-    cfg.setdefault("enabled_types", list(sorter.TYPE_MAP.keys()) + ["Другое"])
     cfg.setdefault("folders", {"musor": "мусор", "apps": "Apps", "files": "Файлы"})
+    cfg.setdefault("layout_mode", "automatic")
+    cfg.setdefault("locations", {})
+    cfg.setdefault("managed_roots", {key: [] for key in organization.LOCATION_KEYS})
+    cfg.setdefault("app_categories", {})
+    cfg.setdefault("custom_file_types", {})
+    cfg.setdefault(
+        "enabled_types",
+        list(sorter.TYPE_MAP) + list(cfg["custom_file_types"]) + ["Другое"],
+    )
     cfg.setdefault("onboarding_done", False)
     if not isinstance(cfg["categories"], dict):
         raise ValueError("Настройка категорий должна быть JSON-объектом.")
+    cfg["categories"].setdefault("Другое", [])
     if not isinstance(cfg["features"], dict):
         raise ValueError("Настройка функций должна быть JSON-объектом.")
     for key, value in default_features.items():
@@ -89,18 +99,67 @@ def load_cfg() -> dict:
         raise ValueError("Имена рабочих папок должны быть строками.")
     if any(not isinstance(value, str) for value in cfg["enabled_types"]):
         raise ValueError("Названия типов файлов должны быть строками.")
+    if cfg["layout_mode"] not in {"automatic", "custom"}:
+        raise ValueError("Неизвестный режим расположения папок.")
+    if not isinstance(cfg["locations"], dict):
+        raise ValueError("Настройка расположения папок должна быть JSON-объектом.")
+    if not isinstance(cfg["managed_roots"], dict):
+        raise ValueError("Список папок для отката должен быть JSON-объектом.")
+    for key in organization.LOCATION_KEYS:
+        roots = cfg["managed_roots"].get(key, [])
+        if not isinstance(roots, list):
+            raise ValueError("Список папок для отката должен содержать массивы путей.")
+        cfg["managed_roots"][key] = list(dict.fromkeys(
+            str(organization.validate_custom_root(root, config.HOME))
+            for root in roots
+        ))
+    if not isinstance(cfg["app_categories"], dict) or any(
+        not isinstance(app, str)
+        or not isinstance(category, str)
+        or category not in cfg["categories"]
+        for app, category in cfg["app_categories"].items()
+    ):
+        raise ValueError("Назначения приложений должны ссылаться на существующие категории.")
+    cfg["custom_file_types"] = organization.validate_custom_file_types(
+        cfg["custom_file_types"], sorter.TYPE_MAP
+    )
+    allowed_types = set(sorter.TYPE_MAP) | set(cfg["custom_file_types"]) | {"Другое"}
+    if any(value not in allowed_types for value in cfg["enabled_types"]):
+        raise ValueError("Включён неизвестный тип файлов.")
+    category_folders = set()
+    for category in cfg["categories"]:
+        folder = organization.category_folder_name(category)
+        if folder.casefold() in category_folders:
+            raise ValueError(f"Две категории используют одну папку: {folder}")
+        category_folders.add(folder.casefold())
+        utils.safe_child_path(config.DESKTOP, folder)
     return cfg
 
 
 def apply_folder_names(cfg: dict) -> None:
-    f = cfg["folders"]
-    config.MUSOR = utils.safe_child_path(config.DESKTOP, f["musor"])
-    config.APPS_ROOT = utils.safe_child_path(config.DESKTOP, f["apps"])
-    config.FILES_ROOT = utils.safe_child_path(config.DESKTOP, f["files"])
+    locations = organization.resolve_locations(cfg, config.DESKTOP, config.HOME)
+    config.MUSOR = locations["screenshots"]
+    config.FILES_ROOT = locations["files"]
+    config.APPS_ROOT = locations["apps"]
+
+
+def unique_destination(path: Path, reserved: set[Path]) -> Path:
+    reserved_names = {str(item).casefold() for item in reserved}
+    candidate = path
+    index = 2
+    while (
+        candidate.exists()
+        or candidate.is_symlink()
+        or str(candidate).casefold() in reserved_names
+    ):
+        candidate = path.with_name(f"{path.stem} ({index}){path.suffix}")
+        index += 1
+    reserved.add(candidate)
+    return candidate
 
 
 def reserve_destination(path: Path, reserved: set[Path]) -> Path:
-    return utils.unique_dst(path, reserved)
+    return unique_destination(path, reserved)
 
 
 class ToolTip:
@@ -127,53 +186,339 @@ class ToolTip:
             self.tip = None
 
 
-def build_actions(cfg: dict) -> list[dict]:
+class SettingsWindow(ctk.CTkToplevel):
+    def __init__(self, parent, cfg: dict, on_saved=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.on_saved = on_saved
+        self.title("Папки и сортировка")
+        self.geometry("760x720")
+        self.transient(parent)
+        self.grab_set()
+        self.location_vars = {}
+        self.type_vars = {}
+        self.custom_types = {
+            name: list(extensions)
+            for name, extensions in cfg["custom_file_types"].items()
+        }
+        self.enabled_types = set(cfg["enabled_types"])
+
+        ctk.CTkLabel(
+            self, text="Куда раскладывать", font=("", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(14, 6))
+        self.mode_var = ctk.StringVar(value=cfg["layout_mode"])
+        modes = ctk.CTkFrame(self, fg_color="transparent")
+        modes.pack(fill="x", padx=14)
+        ctk.CTkRadioButton(
+            modes,
+            text="Автоматические папки на рабочем столе",
+            variable=self.mode_var,
+            value="automatic",
+            command=self.update_location_state,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkLabel(
+            self,
+            text="Для безопасности собственные папки должны находиться внутри домашней папки.",
+            anchor="w",
+            text_color="#9a9a9a",
+        ).pack(anchor="w", padx=16, pady=(0, 4))
+        ctk.CTkRadioButton(
+            modes,
+            text="Выбрать свои папки",
+            variable=self.mode_var,
+            value="custom",
+            command=self.update_location_state,
+        ).pack(anchor="w", pady=2)
+
+        defaults = organization.default_locations(config.DESKTOP, cfg["folders"])
+        for key, label in (
+            ("screenshots", "Скриншоты"),
+            ("files", "Файлы"),
+            ("apps", "Ярлыки приложений"),
+        ):
+            row = ctk.CTkFrame(self, fg_color="transparent")
+            row.pack(fill="x", padx=14, pady=3)
+            ctk.CTkLabel(row, text=label, width=145, anchor="w").pack(side="left")
+            initial = cfg["locations"].get(key, str(defaults[key]))
+            var = ctk.StringVar(value=initial)
+            entry = ctk.CTkEntry(row, textvariable=var)
+            entry.pack(side="left", fill="x", expand=True, padx=5)
+            browse = ctk.CTkButton(
+                row,
+                text="Обзор…",
+                width=80,
+                command=lambda selected=var: self.browse_location(selected),
+            )
+            browse.pack(side="left")
+            self.location_vars[key] = (var, entry, browse)
+
+        ctk.CTkLabel(
+            self, text="Сортировка файлов", font=("", 18, "bold")
+        ).pack(anchor="w", padx=16, pady=(14, 4))
+        types_frame = ctk.CTkScrollableFrame(self, height=180)
+        types_frame.pack(fill="x", padx=14, pady=4)
+        self.types_frame = types_frame
+        self.render_file_types()
+
+        custom = ctk.CTkFrame(self, fg_color="transparent")
+        custom.pack(fill="x", padx=14, pady=(6, 2))
+        self.new_type_entry = ctk.CTkEntry(
+            custom, placeholder_text="Новая папка, например «Книги»", width=250
+        )
+        self.new_type_entry.pack(side="left", padx=(0, 6))
+        self.new_extensions_entry = ctk.CTkEntry(
+            custom, placeholder_text="Расширения: epub, mobi", width=270
+        )
+        self.new_extensions_entry.pack(side="left", padx=6)
+        ctk.CTkButton(custom, text="Добавить тип", width=100,
+                      command=self.add_custom_type).pack(side="left", padx=6)
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.pack(fill="x", padx=14, pady=(12, 14), side="bottom")
+        ctk.CTkButton(buttons, text="Сохранить", command=self.save).pack(side="left")
+        ctk.CTkButton(
+            buttons, text="Отмена", fg_color="#3a3a3a", command=self.destroy
+        ).pack(side="right")
+        self.update_location_state()
+
+    def browse_location(self, variable):
+        initial = Path(variable.get()).expanduser() if variable.get().strip() else config.HOME
+        if not initial.is_dir():
+            initial = initial.parent if initial.parent.is_dir() else config.HOME
+        selected = filedialog.askdirectory(
+            parent=self,
+            initialdir=str(initial),
+            title="Выбери папку назначения",
+        )
+        if selected:
+            variable.set(selected)
+
+    def update_location_state(self):
+        state = "normal" if self.mode_var.get() == "custom" else "disabled"
+        for _, entry, browse in self.location_vars.values():
+            entry.configure(state=state)
+            browse.configure(state=state)
+
+    def render_file_types(self):
+        for widget in self.types_frame.winfo_children():
+            widget.destroy()
+        self.type_vars = {}
+        definitions = {**{name: [] for name in sorter.TYPE_MAP}, **self.custom_types,
+                       "Другое": []}
+        for name, extensions in definitions.items():
+            selected = ctk.BooleanVar(value=name in self.enabled_types)
+            self.type_vars[name] = selected
+            row = ctk.CTkFrame(self.types_frame, fg_color="transparent")
+            row.pack(fill="x", padx=4, pady=1)
+            detail = f" ({', '.join(extensions)})" if extensions else ""
+            ctk.CTkCheckBox(row, text=f"{name}{detail}", variable=selected).pack(
+                side="left"
+            )
+            if name in self.custom_types:
+                ctk.CTkButton(
+                    row,
+                    text="Удалить",
+                    width=65,
+                    height=24,
+                    fg_color="#7a3b3b",
+                    command=lambda item=name: self.remove_custom_type(item),
+                ).pack(side="right")
+
+    def add_custom_type(self):
+        name = self.new_type_entry.get().strip()
+        values = [
+            item.strip()
+            for item in self.new_extensions_entry.get().split(",")
+            if item.strip()
+        ]
+        candidate = {**self.custom_types, name: values}
+        try:
+            validated = organization.validate_custom_file_types(
+                candidate, sorter.TYPE_MAP
+            )
+        except ValueError as exc:
+            messagebox.showerror("Неверный тип файлов", str(exc), parent=self)
+            return
+        self.custom_types = validated
+        self.enabled_types.add(name)
+        self.new_type_entry.delete(0, "end")
+        self.new_extensions_entry.delete(0, "end")
+        self.render_file_types()
+
+    def remove_custom_type(self, name):
+        self.custom_types.pop(name, None)
+        self.enabled_types.discard(name)
+        self.render_file_types()
+
+    def save(self):
+        updated = dict(self.cfg)
+        updated["layout_mode"] = self.mode_var.get()
+        updated["locations"] = {
+            key: var.get().strip()
+            for key, (var, _, _) in self.location_vars.items()
+        }
+        updated["custom_file_types"] = organization.validate_custom_file_types(
+            self.custom_types, sorter.TYPE_MAP
+        )
+        updated["enabled_types"] = [
+            name for name, var in self.type_vars.items() if var.get()
+        ]
+        try:
+            locations = organization.resolve_locations(
+                updated, config.DESKTOP, config.HOME
+            )
+            managed = updated.setdefault(
+                "managed_roots", {key: [] for key in organization.LOCATION_KEYS}
+            )
+            if updated["layout_mode"] == "custom":
+                for key in organization.LOCATION_KEYS:
+                    old_roots = managed.setdefault(key, [])
+                    normalized = str(locations[key])
+                    if normalized not in old_roots:
+                        old_roots.append(normalized)
+            utils.save_json(config.CONFIG_PATH, updated)
+            self.cfg.clear()
+            self.cfg.update(updated)
+            apply_folder_names(self.cfg)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Не удалось сохранить настройки", str(exc), parent=self)
+            return
+        if self.on_saved:
+            self.on_saved()
+        self.destroy()
+
+
+def app_roots_for(cfg: dict) -> list[Path]:
+    roots = [
+        config.APPS_ROOT,
+        organization.default_locations(config.DESKTOP, cfg["folders"])["apps"],
+        *map(Path, cfg["managed_roots"]["apps"]),
+    ]
+    return list(dict.fromkeys(roots))
+
+
+def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
     """Один проход по системе: собираем список предлагаемых действий."""
+    apply_folder_names(cfg)
     actions: list[dict] = []
     reserved: set[Path] = set()
     feat = cfg["features"]
 
     if feat["screenshots"]:
         for f in shots.collect():
-            dst = reserve_destination(config.MUSOR / shots.build_name(f, "", ""), reserved)
+            dst = reserve_destination(
+                utils.safe_child_path(config.MUSOR, shots.build_name(f, "", "")),
+                reserved,
+            )
             if f == dst:
                 continue
             actions.append({
                 "kind": "move", "src": f, "dst": dst,
+                "_source_root": (
+                    "screenshots"
+                    if f.resolve().parent == config.MUSOR.resolve()
+                    else "desktop"
+                ),
+                "_destination_root": "screenshots",
                 "desc": f"Переместить скриншот: {f}  →  {dst}",
             })
 
     if feat["sort_files"]:
         enabled = set(cfg["enabled_types"])
-        for f, t in sorter.collect():
+        for f, t in sorter.collect(cfg["custom_file_types"]):
             if t not in enabled:
                 continue
-            dst = reserve_destination(config.FILES_ROOT / t / f.name, reserved)
+            dst = reserve_destination(
+                utils.safe_child_path(config.FILES_ROOT, t, f.name), reserved
+            )
             actions.append({
                 "kind": "move", "src": f, "dst": dst,
+                "_source_root": "desktop",
+                "_destination_root": "files",
                 "desc": f"Переместить: {f}  →  {dst}",
             })
 
     if feat["apps"]:
         state = utils.load_json(config.STATE_PATH, {"processed": []})
-        if not isinstance(state, dict) or not isinstance(state.get("processed", []), list):
+        if (
+            not isinstance(state, dict)
+            or not isinstance(state.get("processed", []), list)
+            or any(not isinstance(item, str) for item in state.get("processed", []))
+        ):
             raise ValueError("Файл состояния приложения имеет неверный формат.")
+        active_aliases = organization.active_aliases(history or [])
+        app_roots = app_roots_for(cfg)
         for app in apps.scan_applications():
             name = apps.get_app_name(app)
             bid = apps.get_bundle_id(app)
-            if name in state["processed"] or (bid and bid in state["processed"]):
-                continue
-            cat = apps.find_category(name, bid, cfg["categories"])
-            if not cat:
-                cat = "Утилиты"
-            dst = utils.safe_child_path(config.APPS_ROOT, cat, app.stem)
-            actual_dst = dst.with_suffix(".lnk") if not pt.IS_MAC else dst
-            if actual_dst.exists() or actual_dst.is_symlink() or actual_dst in reserved:
-                continue
-            reserved.add(actual_dst)
-            actions.append({"kind": "alias", "src": app, "_bid": bid,
-                            "app": name, "dst": dst,
-                            "desc": f"Создать ярлык: {app}  →  {actual_dst}"})
+            previous = active_aliases.get(str(app.resolve()))
+            if previous and not (
+                previous["path"].exists() or previous["path"].is_symlink()
+            ):
+                previous = None
+            app_key = bid or name
+            cat = cfg["app_categories"].get(app_key) or cfg["app_categories"].get(name)
+            previous_category = (previous or {}).get("category")
+            if previous_category not in cfg["categories"]:
+                previous_category = None
+            previous_folder = (
+                previous["path"].parent.name
+                if previous and previous["path"].parent.name in cfg["categories"]
+                else None
+            )
+            cat = (
+                cat
+                or previous_category
+                or apps.find_category(name, bid, cfg["categories"])
+                or previous_folder
+                or "Другое"
+            )
+            actual_dst = organization.app_destination(
+                config.APPS_ROOT, cat, app.stem, pt.IS_MAC
+            )
+            kind = "alias"
+            app_source = app
+            if previous:
+                app_source = previous["path"]
+                if not any(
+                    (relative := _path_relative_to(app_source.resolve(), root.resolve()))
+                    is not None
+                    and utils.safe_child_path(root, *relative.parts).resolve()
+                    == app_source.resolve()
+                    for root in app_roots
+                ):
+                    raise ValueError(
+                        f"Найден ярлык вне разрешённых папок приложения: {app_source}"
+                    )
+                if app_source == actual_dst:
+                    continue
+                kind = "alias_move"
+                actual_dst = unique_destination(actual_dst, reserved)
+            else:
+                if actual_dst.exists() or actual_dst.is_symlink():
+                    continue
+                if str(actual_dst).casefold() in {
+                    str(item).casefold() for item in reserved
+                }:
+                    actual_dst = unique_destination(actual_dst, reserved)
+                else:
+                    reserved.add(actual_dst)
+            actions.append({
+                "kind": kind,
+                "src": app_source,
+                "_app_src": app,
+                "_bid": bid,
+                "_app_key": app_key,
+                "app": name,
+                "dst": actual_dst,
+                "_destination_root": "apps",
+                "_category": cat,
+                "category_options": list(cfg["categories"]),
+                "desc": (
+                    f"{'Переместить ярлык' if kind == 'alias_move' else 'Создать ярлык'}: "
+                    f"{app_source if kind == 'alias_move' else app}  →  {actual_dst}"
+                ),
+            })
 
     if feat["installers"]:
         app_names = {apps.get_app_name(a).lower() for a in apps.scan_applications()}
@@ -182,11 +527,43 @@ def build_actions(cfg: dict) -> list[dict]:
             if any(n in a or a in n for a in app_names):
                 dst = reserve_destination(config.QUARANTINE_DIR / ins.name, reserved)
                 actions.append({"kind": "trash", "src": ins, "dst": dst,
+                                "_destination_root": "quarantine",
                                 "desc": f"Переместить установщик: {ins}  →  {dst}"})
     return actions
 
 
-def apply_actions(actions: list[dict], history: list) -> int:
+def _path_relative_to(path: Path, root: Path) -> Path | None:
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return None
+
+
+def validate_action_source(path: Path, roots: list[Path], *, direct_child: bool) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Исходный путь заменён символической ссылкой: {path}")
+    resolved = path.resolve()
+    for root in roots:
+        root_resolved = root.resolve()
+        relative = _path_relative_to(resolved, root_resolved)
+        if relative is None or not relative.parts:
+            continue
+        if direct_child and len(relative.parts) != 1:
+            continue
+        checked = utils.safe_child_path(root, *relative.parts)
+        if checked.resolve() == resolved:
+            return
+    raise ValueError(f"Исходный путь находится вне разрешённых папок: {path}")
+
+
+def apply_actions(actions: list[dict], history: list, cfg: dict) -> int:
+    apply_folder_names(cfg)
+    roots = {
+        "screenshots": config.MUSOR,
+        "files": config.FILES_ROOT,
+        "apps": config.APPS_ROOT,
+        "quarantine": config.QUARANTINE_DIR,
+    }
     batch = uuid.uuid4().hex
     state = utils.load_json(config.STATE_PATH, {"processed": []})
     if not isinstance(state, dict) or not isinstance(state.get("processed", []), list):
@@ -200,6 +577,35 @@ def apply_actions(actions: list[dict], history: list) -> int:
             src = a["src"]
             if not (src.exists() or src.is_symlink()):
                 raise FileNotFoundError(f"Исходный файл больше не существует: {src}")
+            kind_roots = {
+                "move": (
+                    [config.MUSOR]
+                    if a.get("_source_root") == "screenshots"
+                    else [config.DESKTOP]
+                ),
+                "trash": [config.DOWNLOADS],
+                "alias": config.APP_DIRS,
+                "alias_move": app_roots_for(cfg),
+            }
+            validate_action_source(
+                src,
+                kind_roots[a["kind"]],
+                direct_child=a["kind"] != "alias_move",
+            )
+            destination_root = roots[a["_destination_root"]]
+            try:
+                relative_destination = a["dst"].relative_to(destination_root)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Путь назначения изменился после предпросмотра: {a['dst']}"
+                ) from exc
+            checked_destination = utils.safe_child_path(
+                destination_root, *relative_destination.parts
+            )
+            if checked_destination != a["dst"]:
+                raise ValueError(
+                    f"Путь назначения изменился после предпросмотра: {a['dst']}"
+                )
             if a["kind"] == "move":
                 if a["dst"].exists() or a["dst"].is_symlink():
                     raise FileExistsError(f"Путь назначения уже занят: {a['dst']}. Выполни новое сканирование.")
@@ -211,20 +617,47 @@ def apply_actions(actions: list[dict], history: list) -> int:
                 utils.logged_move(src, a["dst"], history, allow_unique=False)
                 history[-1]["batch"] = batch
             elif a["kind"] == "alias":
-                actual_dst = a["dst"].with_suffix(".lnk") if not pt.IS_MAC else a["dst"]
+                actual_dst = a["dst"]
                 if actual_dst.exists() or actual_dst.is_symlink():
                     raise FileExistsError(f"Ярлык уже существует: {actual_dst}. Выполни новое сканирование.")
                 real = pt.create_shortcut(a["src"], a["dst"])
-                state["processed"].append(a.get("app", a["src"].stem))
-                if a.get("_bid"):
+                app_name = a.get("app", a["src"].stem)
+                if app_name not in state["processed"]:
+                    state["processed"].append(app_name)
+                if a.get("_bid") and a["_bid"] not in state["processed"]:
                     state["processed"].append(a["_bid"])
+                cfg["app_categories"][a.get("_app_key", app_name)] = a["_category"]
                 history.append({
                     "ts": now(), "action": "alias", "src": str(src),
                     "dst": str(real), "app": a.get("app", a["src"].stem),
-                    "bundle_id": a.get("_bid"), "batch": batch,
+                    "bundle_id": a.get("_bid"), "category": a["_category"],
+                    "batch": batch,
                 })
                 utils.save_json(config.HISTORY_PATH, history)
                 utils.save_json(config.STATE_PATH, state)
+                utils.save_json(config.CONFIG_PATH, cfg)
+            elif a["kind"] == "alias_move":
+                if a["dst"].exists() or a["dst"].is_symlink():
+                    raise FileExistsError(
+                        f"Путь назначения уже занят: {a['dst']}. Выполни новое сканирование."
+                    )
+                utils.logged_move(
+                    src,
+                    a["dst"],
+                    history,
+                    allow_unique=False,
+                    action="alias_move",
+                    metadata={
+                        "app_src": str(a["_app_src"]),
+                        "app": a["app"],
+                        "bundle_id": a.get("_bid"),
+                        "category": a["_category"],
+                        "batch": batch,
+                    },
+                )
+                cfg["app_categories"][a.get("_app_key", a["app"])] = a["_category"]
+                utils.save_json(config.HISTORY_PATH, history)
+                utils.save_json(config.CONFIG_PATH, cfg)
             else:
                 raise ValueError(f"Неизвестный тип действия: {a['kind']}")
             done += 1
@@ -238,7 +671,7 @@ def apply_actions(actions: list[dict], history: list) -> int:
 def can_rollback(entry: dict) -> bool:
     if entry.get("undone"):
         return False
-    if entry.get("action") in {"move", "trash"}:
+    if entry.get("action") in {"move", "trash", "alias_move"}:
         return bool(entry.get("src") and entry.get("dst"))
     if entry.get("action") == "alias":
         return bool(entry.get("dst") or entry.get("alias"))
@@ -285,9 +718,17 @@ HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
 показаны в отдельном окне; перемещение произойдёт только после разрешения.
 
 КАТЕГОРИИ
-Кнопка «Категории» — добавляй и удаляй папки-категории
-для ярлыков приложений. Новое приложение без категории:
-приложение спросит, куда его положить, и запомнит ответ.
+Кнопка «Приложения» позволяет назначить категорию каждому приложению,
+а в предпросмотре можно изменить конкретное назначение. Перемещения
+ярлыков существующих приложений также требуют подтверждения и обратимы.
+Кнопка «Категории» добавляет или удаляет папки для приложений.
+
+ПАПКИ И ТИПЫ
+Кнопка «Папки и типы» позволяет выбрать расположение папок,
+включить нужные типы файлов и добавить собственную категорию
+по расширениям. Пользовательские папки должны быть внутри домашней
+папки пользователя. На Windows и macOS перемещаются только файлы
+и создаваемые ярлыки, сами установленные приложения не перемещаются.
 
 БЕЗОПАСНОСТЬ
 Все действия логируются. Папки-категории и папки типов
@@ -347,10 +788,23 @@ class Wizard(ctk.CTk):
             messagebox.showerror("Недопустимое имя папки", str(exc), parent=self)
             return False
         f.update(requested)
+        self.cfg["layout_mode"] = self.cfg.get("layout_mode", "automatic")
         for k in self.cfg["features"]:
             self.cfg["features"][k] = self.vars[f"feat_{k}"].get()
-        self.cfg["enabled_types"] = [t for t in list(sorter.TYPE_MAP.keys()) + ["Другое"]
-                                     if self.vars[f"type_{t}"].get()]
+        available_types = list(sorter.TYPE_MAP) + list(self.cfg["custom_file_types"]) + ["Другое"]
+        enabled_before = set(self.cfg["enabled_types"])
+        self.cfg["enabled_types"] = []
+        for type_name in available_types:
+            variable = self.vars.get(f"type_{type_name}")
+            if variable is not None and variable.get():
+                self.cfg["enabled_types"].append(type_name)
+            elif variable is None and type_name in enabled_before:
+                self.cfg["enabled_types"].append(type_name)
+        try:
+            organization.resolve_locations(self.cfg, config.DESKTOP, config.HOME)
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror("Недопустимое расположение папок", str(exc), parent=self)
+            return False
         return True
 
     def show_page(self, n: int):
@@ -404,10 +858,20 @@ class Wizard(ctk.CTk):
                 self.vars[f"feat_{k}"] = v
             ctk.CTkLabel(box, text="Какие папки типов создавать:", justify="left",
                          font=("", 14, "bold")).pack(anchor="w", padx=8, pady=(10, 2))
-            for t in list(sorter.TYPE_MAP.keys()) + ["Другое"]:
+            for t in list(sorter.TYPE_MAP.keys()) + list(self.cfg["custom_file_types"]) + ["Другое"]:
                 v = ctk.BooleanVar(value=t in self.cfg["enabled_types"])
                 ctk.CTkCheckBox(box, text=t, variable=v).pack(anchor="w", padx=16, pady=2)
                 self.vars[f"type_{t}"] = v
+            ctk.CTkButton(
+                box,
+                text="Настроить расположение и типы файлов…",
+                fg_color="#3a3a3a",
+                command=lambda: SettingsWindow(
+                    self,
+                    self.cfg,
+                    on_saved=self.sync_type_settings,
+                ),
+            ).pack(anchor="w", padx=16, pady=(8, 2))
             self.nav()
         else:
             ctk.CTkLabel(self.frame, text="Всё готово", font=("", 26, "bold")).pack(pady=(40, 8))
@@ -417,6 +881,11 @@ class Wizard(ctk.CTk):
                 "Нажми «Начать сканирование» — я один раз пройду по системе\n"
                 "и покажу, что и куда предлагаю переместить.")).pack(padx=30)
             self.nav(last=True)
+
+    def sync_type_settings(self):
+        for type_name, variable in self.vars.items():
+            if type_name.startswith("type_"):
+                variable.set(type_name[5:] in self.cfg["enabled_types"])
 
 
 class Main(ctk.CTk):
@@ -459,6 +928,20 @@ class Main(ctk.CTk):
         ToolTip(self.auto, "Запускать DesktopKeeper при входе в систему")
         ctk.CTkButton(mid, text="Категории", width=100, fg_color="#3a3a3a",
                       command=self.edit_categories).pack(side="right", padx=4)
+        ctk.CTkButton(
+            mid,
+            text="Папки и типы",
+            width=115,
+            fg_color="#3a3a3a",
+            command=lambda: SettingsWindow(self, self.cfg, self.settings_saved),
+        ).pack(side="right", padx=4)
+        ctk.CTkButton(
+            mid,
+            text="Приложения",
+            width=100,
+            fg_color="#3a3a3a",
+            command=self.edit_app_assignments,
+        ).pack(side="right", padx=4)
         ctk.CTkButton(mid, text="Справка", width=90, fg_color="#3a3a3a",
                       command=self.show_help).pack(side="right")
 
@@ -468,6 +951,9 @@ class Main(ctk.CTk):
         self.list = ctk.CTkScrollableFrame(self, label_text="Предлагаемые действия")
         self.list.pack(fill="both", expand=True, padx=14, pady=(4, 14))
         self.after(1500, self.schedule_update_check)
+
+    def settings_saved(self):
+        self.status.configure(text="Настройки сохранены. Новые назначения будут показаны при следующем сканировании.")
 
     def schedule_update_check(self):
         today = datetime.now().date().isoformat()
@@ -497,7 +983,7 @@ class Main(ctk.CTk):
         for w in self.list.winfo_children():
             w.destroy()
         try:
-            self.actions = build_actions(self.cfg)
+            self.actions = build_actions(self.cfg, self.history)
         except (OSError, TypeError, ValueError) as exc:
             self.status.configure(text="Не удалось безопасно подготовить предпросмотр.")
             messagebox.showerror("Ошибка предпросмотра", str(exc), parent=self)
@@ -511,6 +997,7 @@ class Main(ctk.CTk):
             ctk.CTkLabel(self.list, text=a["desc"], anchor="w").pack(
                 anchor="w", padx=10, pady=3
             )
+            a["_labels"] = [self.list.winfo_children()[-1]]
         self.refresh_count()
         self.status.configure(text=f"Подготовлено действий: {len(self.actions)}. Проверь отдельное окно предпросмотра.")
         self.show_preview()
@@ -521,6 +1008,44 @@ class Main(ctk.CTk):
                                  text=f"Предпросмотр действий ({n})")
         if self.preview_apply_btn:
             self.preview_apply_btn.configure(state="normal" if n else "disabled")
+
+    def update_app_category(self, action: dict, category: str):
+        if category not in action["category_options"]:
+            return
+        reserved = {
+            other["dst"]
+            for other in self.actions
+            if other is not action and other["kind"] in {"alias", "alias_move"}
+        }
+        destination = organization.app_destination(
+            config.APPS_ROOT, category, action["src"].stem, pt.IS_MAC
+        )
+        if action["kind"] == "alias_move" and destination == action["src"]:
+            action["dst"] = destination
+            action["_category"] = category
+            action["_auto_unchecked"] = action["var"].get()
+            action["var"].set(False)
+            action["desc"] = f"Ярлык уже находится в категории «{category}»: {destination}"
+            for label in action.get("_labels", []):
+                label.configure(text=action["desc"])
+            self.refresh_count()
+            return
+        if (
+            destination.exists()
+            or destination.is_symlink()
+            or str(destination).casefold()
+            in {str(item).casefold() for item in reserved}
+        ):
+            destination = unique_destination(destination, reserved)
+        action["dst"] = destination
+        action["_category"] = category
+        if action.pop("_auto_unchecked", False):
+            action["var"].set(True)
+        verb = "Переместить ярлык" if action["kind"] == "alias_move" else "Создать ярлык"
+        action["desc"] = f"{verb}: {action['src']}  →  {destination}"
+        for label in action.get("_labels", []):
+            label.configure(text=action["desc"])
+        self.refresh_count()
 
     def show_preview(self):
         if not self.actions:
@@ -552,6 +1077,16 @@ class Main(ctk.CTk):
                 command=self.refresh_count,
                 width=24,
             ).pack(side="left", padx=(0, 6))
+            if action["kind"] in {"alias", "alias_move"}:
+                ctk.CTkOptionMenu(
+                    row,
+                    values=action["category_options"],
+                    variable=ctk.StringVar(value=action["_category"]),
+                    width=150,
+                    command=lambda value, selected=action: self.update_app_category(
+                        selected, value
+                    ),
+                ).pack(side="left", padx=(0, 8))
             ctk.CTkLabel(
                 row,
                 text=action["desc"],
@@ -559,6 +1094,7 @@ class Main(ctk.CTk):
                 anchor="w",
                 wraplength=670,
             ).pack(side="left", fill="x", expand=True)
+            action.setdefault("_labels", []).append(row.winfo_children()[-1])
         buttons = ctk.CTkFrame(win, fg_color="transparent")
         buttons.pack(fill="x", padx=14, pady=(6, 14))
         self.preview_apply_btn = ctk.CTkButton(
@@ -594,7 +1130,7 @@ class Main(ctk.CTk):
         if not messagebox.askyesno("Подтверждение", f"Выполнить действий: {n}?"):
             return
         try:
-            done = apply_actions(self.actions, self.history)
+            done = apply_actions(self.actions, self.history, self.cfg)
         except (OSError, TypeError, ValueError) as exc:
             messagebox.showerror("Ошибка применения", str(exc), parent=self.preview_window or self)
             return
@@ -634,8 +1170,14 @@ class Main(ctk.CTk):
             return
 
         source = self.pending_shots.pop(0)
+        try:
+            apply_folder_names(self.cfg)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("Ошибка пути", str(exc), parent=self)
+            self.after_idle(self.show_next_screenshot_preview)
+            return
         destination = utils.unique_dst(
-            config.MUSOR / shots.build_name(source, "", "")
+            utils.safe_child_path(config.MUSOR, shots.build_name(source, "", ""))
         )
         win = ctk.CTkToplevel(self)
         self.shot_preview_window = win
@@ -657,8 +1199,21 @@ class Main(ctk.CTk):
                 parent=win,
             ):
                 try:
+                    apply_folder_names(self.cfg)
                     if not shots.is_screenshot(source):
                         raise FileNotFoundError(f"Скриншот больше не доступен: {source}")
+                    validate_action_source(
+                        source,
+                        [config.DESKTOP, config.MUSOR],
+                        direct_child=True,
+                    )
+                    relative_destination = destination.relative_to(config.MUSOR)
+                    if utils.safe_child_path(
+                        config.MUSOR, *relative_destination.parts
+                    ) != destination:
+                        raise ValueError(
+                            f"Путь назначения изменился после предпросмотра: {destination}"
+                        )
                     if destination.exists() or destination.is_symlink():
                         raise FileExistsError(f"Путь назначения уже занят: {destination}")
                     utils.logged_move(source, destination, self.history, allow_unique=False)
@@ -691,7 +1246,7 @@ class Main(ctk.CTk):
         unavailable = [
             entry for entry in self.history
             if not entry.get("undone")
-            and entry.get("action") in {"move", "trash", "alias"}
+            and entry.get("action") in {"move", "trash", "alias", "alias_move"}
             and not can_rollback(entry)
         ]
         if not reversible:
@@ -768,9 +1323,27 @@ class Main(ctk.CTk):
                     state,
                     config.ROLLBACK_DIR,
                     {
-                        "move_sources": [config.DESKTOP, config.DOWNLOADS],
-                        "move_destinations": [config.DESKTOP, config.QUARANTINE_DIR],
-                        "alias_destinations": [config.APPS_ROOT],
+                        "move_sources": [
+                            config.DESKTOP,
+                            config.DOWNLOADS,
+                            config.MUSOR,
+                            *map(Path, self.cfg["managed_roots"]["screenshots"]),
+                        ],
+                        "move_destinations": [
+                            config.DESKTOP,
+                            config.QUARANTINE_DIR,
+                            config.MUSOR,
+                            config.FILES_ROOT,
+                            *map(Path, self.cfg["managed_roots"]["screenshots"]),
+                            *map(Path, self.cfg["managed_roots"]["files"]),
+                        ],
+                        "alias_destinations": [
+                            config.APPS_ROOT,
+                            organization.default_locations(
+                                config.DESKTOP, self.cfg["folders"]
+                            )["apps"],
+                            *map(Path, self.cfg["managed_roots"]["apps"]),
+                        ],
                         "rollback_roots": [config.DATA_DIR],
                     },
                 )
@@ -813,7 +1386,10 @@ class Main(ctk.CTk):
             def on_shot(p: Path):
                 self.after(0, lambda: self.queue_screenshot_review(p))
             self.observer = Observer()
-            for folder in (config.DESKTOP, config.MUSOR):
+            folders = dict.fromkeys(
+                folder.resolve() for folder in (config.DESKTOP, config.MUSOR)
+            )
+            for folder in folders:
                 folder.mkdir(parents=True, exist_ok=True)
                 self.observer.schedule(ShotWatcher(on_shot), str(folder), recursive=False)
             self.observer.start()
@@ -876,7 +1452,26 @@ class Main(ctk.CTk):
         def remove():
             sel = ent.get().strip()
             if sel in self.cfg["categories"]:
+                if sel == "Другое":
+                    messagebox.showwarning(
+                        "Категория защищена",
+                        "Категорию «Другое» нельзя удалить.",
+                        parent=win,
+                    )
+                    return
+                if not messagebox.askyesno(
+                    "Удалить категорию",
+                    f"Удалить «{sel}» из доступных категорий?\n"
+                    "Уже созданные ярлыки и файлы останутся на месте.",
+                    parent=win,
+                ):
+                    return
                 del self.cfg["categories"][sel]
+                self.cfg["app_categories"] = {
+                    app: category
+                    for app, category in self.cfg["app_categories"].items()
+                    if category != sel
+                }
                 utils.save_json(config.CONFIG_PATH, self.cfg)
                 refresh()
 
@@ -885,6 +1480,79 @@ class Main(ctk.CTk):
                       command=remove).pack(side="left")
         ctk.CTkLabel(win, text="«+» создать, «−» удалить (имя в поле ввода)",
                      font=("", 11), text_color="#9a9a9a").pack(pady=(0, 10))
+
+    def edit_app_assignments(self):
+        try:
+            installed = apps.scan_applications()
+        except OSError as exc:
+            messagebox.showerror("Сканирование приложений", str(exc), parent=self)
+            return
+        if not installed:
+            messagebox.showinfo("Приложения", "Установленные приложения не найдены.", parent=self)
+            return
+
+        aliases = organization.active_aliases(self.history)
+        win = ctk.CTkToplevel(self)
+        win.title("Категории приложений")
+        win.geometry("760x560")
+        win.transient(self)
+        win.grab_set()
+        ctk.CTkLabel(
+            win,
+            text="Выбери папку для каждого приложения. Перемещения появятся в предпросмотре.",
+            anchor="w",
+            wraplength=700,
+        ).pack(fill="x", padx=14, pady=(14, 8))
+        rows = ctk.CTkScrollableFrame(win, label_text="Найденные приложения")
+        rows.pack(fill="both", expand=True, padx=14, pady=6)
+        assignments = {}
+        categories = list(self.cfg["categories"])
+        for app in installed:
+            name = apps.get_app_name(app)
+            bundle_id = apps.get_bundle_id(app)
+            previous = aliases.get(str(app.resolve()))
+            selected = (
+                self.cfg["app_categories"].get(bundle_id)
+                or self.cfg["app_categories"].get(name)
+                or ((previous or {}).get("category"))
+                or apps.find_category(name, bundle_id, self.cfg["categories"])
+                or "Другое"
+            )
+            if selected not in categories:
+                selected = "Другое"
+            row = ctk.CTkFrame(rows, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=3)
+            ctk.CTkLabel(
+                row, text=name, width=190, anchor="w"
+            ).pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(
+                row, text=str(app), anchor="w", text_color="#9a9a9a"
+            ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            variable = ctk.StringVar(value=selected)
+            ctk.CTkOptionMenu(
+                row, values=categories, variable=variable, width=150
+            ).pack(side="right")
+            assignments[bundle_id or name] = variable
+
+        def save():
+            for name, variable in assignments.items():
+                self.cfg["app_categories"][name] = variable.get()
+            try:
+                utils.save_json(config.CONFIG_PATH, self.cfg)
+            except (OSError, TypeError, ValueError) as exc:
+                messagebox.showerror("Ошибка сохранения", str(exc), parent=win)
+                return
+            win.destroy()
+            self.status.configure(
+                text="Назначения сохранены. Нажми «Сканировать систему», чтобы увидеть перемещения."
+            )
+
+        buttons = ctk.CTkFrame(win, fg_color="transparent")
+        buttons.pack(fill="x", padx=14, pady=(6, 14))
+        ctk.CTkButton(buttons, text="Сохранить назначения", command=save).pack(side="left")
+        ctk.CTkButton(
+            buttons, text="Отмена", fg_color="#3a3a3a", command=win.destroy
+        ).pack(side="right")
 
     def show_help(self):
         win = ctk.CTkToplevel(self)

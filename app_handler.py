@@ -8,7 +8,8 @@ from datetime import datetime
 from pathlib import Path
 
 import config
-from utils import load_json, save_json, safe_child_path, logged_move, unique_dst
+import organization
+from utils import load_json, save_json, logged_move, unique_dst
 
 
 def get_bundle_id(app_path: Path) -> str:
@@ -71,10 +72,12 @@ def ask_category(app_name: str, categories: dict) -> str:
 
 
 def create_alias(app_path: Path, category: str) -> Path | None:
-    target_folder = safe_child_path(config.APPS_ROOT, category)
+    alias_path = organization.app_destination(
+        config.APPS_ROOT, category, app_path.stem, pt.IS_MAC
+    )
+    target_folder = alias_path.parent
     target_folder.mkdir(parents=True, exist_ok=True)
-    alias_path = safe_child_path(target_folder, app_path.stem)
-    if alias_path.exists() or alias_path.is_symlink() or alias_path.with_suffix(".lnk").exists():
+    if alias_path.exists() or alias_path.is_symlink():
         print(f"  Пропускаю, ярлык уже существует: {alias_path}")
         return None
     try:
@@ -100,12 +103,16 @@ def quarantine_installer(path: Path, history: list, destination: Path | None = N
 def scan_applications() -> list[Path]:
     """Сканируем /Applications и ~/Applications на .app"""
     apps = []
+    seen = set()
     for folder in config.APP_DIRS:
         if folder.is_dir():
-            apps += [
-                f for f in folder.iterdir()
-                if f.suffix == pt.APP_EXT and not f.is_symlink()
-            ]
+            for item in folder.iterdir():
+                if item.suffix != pt.APP_EXT or item.is_symlink():
+                    continue
+                identity = str(item.resolve())
+                if identity not in seen:
+                    seen.add(identity)
+                    apps.append(item)
     return apps
 
 
@@ -140,6 +147,14 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         for category, names in categories.items()
     ):
         raise ValueError("Настройка категорий должна быть JSON-объектом.")
+    app_categories = config_data.get("app_categories", {})
+    if not isinstance(app_categories, dict) or any(
+        not isinstance(app_name, str)
+        or not isinstance(category, str)
+        or category not in categories
+        for app_name, category in app_categories.items()
+    ):
+        raise ValueError("Назначения приложений должны ссылаться на существующие категории.")
     
     # Сканируем приложения
     apps = scan_applications()
@@ -155,11 +170,14 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         if app_name in state["processed"] or bundle_id in state["processed"]:
             continue
         
-        category = find_category(app_name, bundle_id, categories)
+        category = app_categories.get(bundle_id) or app_categories.get(app_name)
+        category = category or find_category(app_name, bundle_id, categories)
         if not category and not dry_run:
             category = ask_category(app_name, categories)
         category = category or "Утилиты"
-        safe_child_path(config.APPS_ROOT, category, app.stem)
+        organization.app_destination(
+            config.APPS_ROOT, category, app.stem, pt.IS_MAC
+        )
         new_apps.append((app, app_name, bundle_id, category))
     
     if not new_apps:
@@ -171,17 +189,17 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
     if dry_run:
         print("\nПредпросмотр (dry run):")
         for app, app_name, bundle_id, category in new_apps:
-            destination = safe_child_path(config.APPS_ROOT, category, app.stem)
-            if not pt.IS_MAC:
-                destination = destination.with_suffix(".lnk")
+            destination = organization.app_destination(
+                config.APPS_ROOT, category, app.stem, pt.IS_MAC
+            )
             print(f"  Создать ярлык: {app} → {destination}")
         return False
 
     print("\nПредпросмотр действий:")
     for app, app_name, bundle_id, category in new_apps:
-        destination = safe_child_path(config.APPS_ROOT, category, app.stem)
-        if not pt.IS_MAC:
-            destination = destination.with_suffix(".lnk")
+        destination = organization.app_destination(
+            config.APPS_ROOT, category, app.stem, pt.IS_MAC
+        )
         print(f"  Создать ярлык: {app} → {destination}")
     if input("\nСоздать эти ярлыки? [y/N] ").strip().lower() != "y":
         print("Отменено.")

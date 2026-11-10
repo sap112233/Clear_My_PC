@@ -81,9 +81,24 @@ def unique_dst(dst: Path, reserved: set[Path] | None = None) -> Path:
     return dst
 
 
-def logged_move(src: Path, dst: Path, history: list, *, allow_unique: bool = True) -> Path:
+def logged_move(
+    src: Path,
+    dst: Path,
+    history: list,
+    *,
+    allow_unique: bool = True,
+    action: str = "move",
+    metadata: dict | None = None,
+) -> Path:
     import config
 
+    if action not in {"move", "trash", "alias_move"}:
+        raise ValueError(f"Недопустимый тип перемещения: {action}")
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or {"ts", "action", "src", "dst", "status"} & metadata.keys()
+    ):
+        raise ValueError("Дополнительные данные перемещения имеют неверный формат.")
     if not (src.exists() or src.is_symlink()):
         raise FileNotFoundError(src)
     if allow_unique:
@@ -92,11 +107,13 @@ def logged_move(src: Path, dst: Path, history: list, *, allow_unique: bool = Tru
         raise FileExistsError(dst)
     entry = {
         "ts": datetime.now().isoformat(),
-        "action": "move",
+        "action": action,
         "src": str(src),
         "dst": str(dst),
         "status": "pending",
     }
+    if metadata:
+        entry.update(metadata)
     history.append(entry)
     try:
         save_json(config.HISTORY_PATH, history)
@@ -185,6 +202,30 @@ def rollback_entries(
                 archived = unique_dst(rollback_dir / f"{uuid.uuid4().hex}-{alias.name}")
                 shutil.move(str(alias), str(archived))
                 entry["undo_dst"] = str(archived)
+            elif action == "alias_move":
+                src_value, dst_value = entry.get("src"), entry.get("dst")
+                if not src_value or not dst_value:
+                    raise ValueError("Для перемещения ярлыка не сохранены пути.")
+                original, current = Path(src_value), Path(dst_value)
+                roots = allowed_roots["alias_destinations"]
+                if not is_managed_path(original, roots) or not is_managed_path(current, roots):
+                    raise ValueError("Перемещение ярлыка вышло за разрешённые папки.")
+                if (
+                    entry.get("status") == "pending"
+                    and not (current.exists() or current.is_symlink())
+                    and (original.exists() or original.is_symlink())
+                ):
+                    entry["undone"] = True
+                    entry["status"] = "undone"
+                    entry["undo_ts"] = datetime.now().isoformat()
+                    restored += 1
+                    continue
+                if not (current.exists() or current.is_symlink()):
+                    raise FileNotFoundError(f"Ярлык после перемещения не найден: {current}")
+                if original.exists() or original.is_symlink():
+                    raise FileExistsError(f"Исходное место ярлыка уже занято: {original}")
+                original.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(current), str(original))
             else:
                 raise ValueError(f"Действие «{action}» нельзя откатить.")
 

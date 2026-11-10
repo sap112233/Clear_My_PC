@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import config
+import organization
 import screenshot_handler as shots
 from utils import logged_move, save_json, unique_dst
 
@@ -19,15 +20,11 @@ TYPE_MAP = {
 SKIP_NAMES = {".DS_Store", ".localized", "desktop.ini"}
 
 
-def type_for(p: Path) -> str:
-    ext = p.suffix.lower()
-    for type_name, exts in TYPE_MAP.items():
-        if ext in exts:
-            return type_name
-    return "Другое"
+def type_for(p: Path, custom_types: dict[str, list[str]] | None = None) -> str:
+    return organization.file_category_for(p, TYPE_MAP, custom_types or {})
 
 
-def collect() -> list[tuple[Path, str]]:
+def collect(custom_types: dict[str, list[str]] | None = None) -> list[tuple[Path, str]]:
     out = []
     if not config.DESKTOP.is_dir():
         return out
@@ -36,12 +33,19 @@ def collect() -> list[tuple[Path, str]]:
             continue
         if shots.is_screenshot(f):
             continue
-        out.append((f, type_for(f)))
+        out.append((f, type_for(f, custom_types)))
     return out
 
 
-def run(history: list) -> None:
-    items = collect()
+def run(
+    history: list,
+    custom_types: dict[str, list[str]] | None = None,
+    enabled_types: list[str] | None = None,
+) -> None:
+    items = collect(custom_types)
+    if enabled_types is not None:
+        enabled = set(enabled_types)
+        items = [(source, category) for source, category in items if category in enabled]
     if not items:
         print("На рабочем столе нет файлов для сортировки.")
         return

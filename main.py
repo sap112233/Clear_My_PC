@@ -19,8 +19,49 @@ import app_handler as apps
 import categories
 import config
 import file_sorter as sorter
+import organization
 import screenshot_handler as shots
 import utils
+
+
+def load_user_settings() -> dict:
+    settings = utils.load_json(config.CONFIG_PATH, {})
+    if not isinstance(settings, dict):
+        raise ValueError("Файл настроек должен содержать JSON-объект.")
+    settings.setdefault("folders", {"musor": "мусор", "apps": "Apps", "files": "Файлы"})
+    if not isinstance(settings["folders"], dict) or any(
+        not isinstance(value, str) for value in settings["folders"].values()
+    ):
+        raise ValueError("Имена рабочих папок должны быть строками.")
+    settings.setdefault("layout_mode", "automatic")
+    settings.setdefault("locations", {})
+    settings.setdefault("custom_file_types", {})
+    settings["custom_file_types"] = organization.validate_custom_file_types(
+        settings["custom_file_types"], sorter.TYPE_MAP
+    )
+    settings.setdefault(
+        "enabled_types",
+        list(sorter.TYPE_MAP)
+        + list(settings["custom_file_types"])
+        + ["Другое"],
+    )
+    if not isinstance(settings["enabled_types"], list) or any(
+        not isinstance(item, str) for item in settings["enabled_types"]
+    ):
+        raise ValueError("Список типов файлов должен быть массивом строк.")
+    available_types = (
+        set(sorter.TYPE_MAP) | set(settings["custom_file_types"]) | {"Другое"}
+    )
+    if any(item not in available_types for item in settings["enabled_types"]):
+        raise ValueError("Включён неизвестный тип файлов.")
+
+    locations = organization.resolve_locations(
+        settings, config.DESKTOP, config.HOME
+    )
+    config.MUSOR = locations["screenshots"]
+    config.FILES_ROOT = locations["files"]
+    config.APPS_ROOT = locations["apps"]
+    return settings
 
 
 class ShotWatcher(FileSystemEventHandler):
@@ -47,7 +88,10 @@ class ShotWatcher(FileSystemEventHandler):
 
 def watch(history: list) -> None:
     obs = Observer()
-    for folder in (config.DESKTOP, config.MUSOR):
+    folders = dict.fromkeys(
+        folder.resolve() for folder in (config.DESKTOP, config.MUSOR)
+    )
+    for folder in folders:
         folder.mkdir(parents=True, exist_ok=True)
         obs.schedule(ShotWatcher(history), str(folder), recursive=False)
     obs.start()
@@ -95,6 +139,7 @@ def main() -> None:
     ap.add_argument("--add-category", metavar="NAME")
     args = ap.parse_args()
 
+    settings = load_user_settings()
     history = utils.load_json(config.HISTORY_PATH, [])
     if not isinstance(history, list) or any(
         not isinstance(entry, dict) for entry in history
@@ -118,7 +163,11 @@ def main() -> None:
         if apps.process_installers(history):
             utils.save_json(config.HISTORY_PATH, history)
     elif args.sort_files:
-        sorter.run(history)
+        sorter.run(
+            history,
+            settings["custom_file_types"],
+            settings["enabled_types"],
+        )
     elif args.add_category:
         categories.add_category(args.add_category)
     else:

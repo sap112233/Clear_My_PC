@@ -31,7 +31,12 @@ def process(src: Path, history: list, live: bool = False) -> Path:
 
 def collect() -> list[Path]:
     out = []
+    visited = set()
     for folder in (config.DESKTOP, config.MUSOR):
+        resolved_folder = folder.resolve()
+        if resolved_folder in visited:
+            continue
+        visited.add(resolved_folder)
         if folder.is_dir():
             out += [f for f in sorted(folder.iterdir()) if is_screenshot(f)]
     return out

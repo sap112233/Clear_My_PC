@@ -85,6 +85,35 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(saved[0]["status"], "complete")
             self.assertEqual(saved[0]["dst"], str(destination))
 
+    def test_alias_move_metadata_is_journaled_before_the_move(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "Apps" / "Old" / "Example.lnk"
+            destination = root / "Apps" / "New" / "Example.lnk"
+            source.parent.mkdir(parents=True)
+            source.write_text("shortcut", encoding="utf-8")
+            history_path = root / "history.json"
+            history = []
+
+            with mock.patch.object(config, "HISTORY_PATH", history_path):
+                utils.logged_move(
+                    source,
+                    destination,
+                    history,
+                    allow_unique=False,
+                    action="alias_move",
+                    metadata={"app_src": "/Applications/Example.app", "category": "New"},
+                )
+
+            self.assertEqual(history[0]["action"], "alias_move")
+            self.assertEqual(history[0]["status"], "complete")
+            self.assertEqual(history[0]["app_src"], "/Applications/Example.app")
+            saved = utils.load_json(history_path, [])
+            self.assertEqual(saved[0]["action"], "alias_move")
+            self.assertEqual(saved[0]["category"], "New")
+
     def test_rollback_does_not_overwrite_existing_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -152,6 +181,29 @@ class SafetyTests(unittest.TestCase):
             self.assertEqual(state["processed"], [])
             self.assertTrue(Path(entry["undo_dst"]).is_file())
             self.assertEqual(Path(entry["undo_dst"]).read_text(encoding="utf-8"), "shortcut")
+
+    def test_alias_move_rollback_restores_shortcut_to_previous_category(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original = root / "Apps" / "Utilities" / "Example.lnk"
+            moved = root / "Apps" / "Development" / "Example.lnk"
+            moved.parent.mkdir(parents=True)
+            moved.write_text("shortcut", encoding="utf-8")
+            entry = {
+                "action": "alias_move",
+                "src": str(original),
+                "dst": str(moved),
+                "app_src": "/Applications/Example.app",
+            }
+
+            count, errors = utils.rollback_entries(
+                [entry], [entry], {}, root / "rollback", allowed_roots(root)
+            )
+
+            self.assertEqual((count, errors), (1, []))
+            self.assertTrue(original.is_file())
+            self.assertFalse(moved.exists())
+            self.assertTrue(entry["undone"])
 
     def test_safe_child_path_rejects_traversal_and_symlink_escape(self):
         with tempfile.TemporaryDirectory() as temp_dir:
