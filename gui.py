@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import queue
@@ -122,6 +123,29 @@ def load_cfg() -> dict:
     ]
     config.EXCLUDED_FOLDERS = [Path(path) for path in cfg["excluded_folders"]]
     cfg.setdefault("app_categories", {})
+    cfg.setdefault("app_locations", {})
+    if not isinstance(cfg["app_locations"], dict) or any(
+        not isinstance(app, str) or not app
+        for app in cfg["app_locations"]
+    ):
+        raise ValueError("Пути приложений должны быть JSON-объектом с именами приложений.")
+    cfg["app_locations"] = {
+        app: str(organization.validate_custom_root(path, config.HOME))
+        for app, path in cfg["app_locations"].items()
+    }
+    cfg.setdefault("excluded_apps", [])
+    if not isinstance(cfg["excluded_apps"], list) or any(
+        not isinstance(app, str) or not app for app in cfg["excluded_apps"]
+    ):
+        raise ValueError("Исключённые приложения должны быть списком имён.")
+    cfg["excluded_apps"] = list(dict.fromkeys(cfg["excluded_apps"]))
+    cfg.setdefault("favorite_app_folders", [])
+    if not isinstance(cfg["favorite_app_folders"], list):
+        raise ValueError("Избранные папки приложений должны быть списком путей.")
+    cfg["favorite_app_folders"] = list(dict.fromkeys(
+        str(organization.validate_custom_root(path, config.HOME))
+        for path in cfg["favorite_app_folders"]
+    ))
     cfg.setdefault("custom_file_types", {})
     cfg.setdefault(
         "enabled_types",
@@ -602,8 +626,34 @@ def app_roots_for(cfg: dict) -> list[Path]:
         config.APPS_ROOT,
         organization.default_locations(config.DESKTOP, cfg["folders"])["apps"],
         *map(Path, cfg["managed_roots"]["apps"]),
+        *map(Path, cfg.get("app_locations", {}).values()),
     ]
     return list(dict.fromkeys(roots))
+
+
+def app_destination_root(cfg: dict, app_key: str, app_name: str) -> Path:
+    custom_root = cfg.get("app_locations", {}).get(app_key)
+    if custom_root is None:
+        custom_root = cfg.get("app_locations", {}).get(app_name)
+    if custom_root is None:
+        return config.APPS_ROOT
+    return organization.validate_custom_root(custom_root, config.HOME)
+
+
+def app_destination_for(
+    cfg: dict,
+    app_key: str,
+    app_name: str,
+    category: str,
+    display_name: str,
+) -> Path:
+    return apps.application_destination(
+        app_key,
+        app_name,
+        category,
+        display_name,
+        cfg.get("app_locations", {}),
+    )
 
 
 def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
@@ -677,6 +727,10 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
             ):
                 previous = None
             app_key = bid or name
+            if app_key in cfg.get("excluded_apps", []) or name in cfg.get(
+                "excluded_apps", []
+            ):
+                continue
             cat = cfg["app_categories"].get(app_key) or cfg["app_categories"].get(name)
             previous_category = (previous or {}).get("category")
             if previous_category not in cfg["categories"]:
@@ -693,8 +747,9 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
                 or previous_folder
                 or "Другое"
             )
-            actual_dst = organization.app_destination(
-                config.APPS_ROOT, cat, apps.get_app_name(app), pt.IS_MAC, pt.IS_LINUX
+            destination_root = app_destination_root(cfg, app_key, name)
+            actual_dst = app_destination_for(
+                cfg, app_key, name, cat, apps.get_app_name(app)
             )
             if organization.is_excluded_path(actual_dst, config.EXCLUDED_FOLDERS):
                 continue
@@ -734,6 +789,7 @@ def build_actions(cfg: dict, history: list[dict] | None = None) -> list[dict]:
                 "app": name,
                 "dst": actual_dst,
                 "_destination_root": "apps",
+                "_destination_root_path": destination_root,
                 "_category": cat,
                 "category_options": list(cfg["categories"]),
                 "desc": (
@@ -825,7 +881,13 @@ def apply_actions(actions: list[dict], history: list, cfg: dict) -> int:
                 kind_roots[a["kind"]],
                 direct_child=a["kind"] not in {"alias", "alias_move"},
             )
-            destination_root = roots[a["_destination_root"]]
+            destination_root = a.get(
+                "_destination_root_path", roots[a["_destination_root"]]
+            )
+            if a["kind"] in {"alias", "alias_move"} and destination_root not in app_roots_for(cfg):
+                raise ValueError(
+                    f"Папка назначения ярлыка не разрешена настройками: {destination_root}"
+                )
             try:
                 relative_destination = a["dst"].relative_to(destination_root)
             except ValueError as exc:
@@ -1051,10 +1113,11 @@ HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
 В Linux нельзя универсально менять папку снимков для всех окружений и приложений.
 
 КАТЕГОРИИ
-Кнопка «Приложения» позволяет назначить категорию каждому приложению,
-а в предпросмотре можно изменить конкретное назначение. Перемещения
-ярлыков существующих приложений также требуют подтверждения и обратимы.
-Кнопка «Категории» добавляет или удаляет папки для приложений.
+Кнопка «Приложения» позволяет искать и фильтровать программы, массово
+назначать категории и папки из избранного, выбирать отдельную папку ярлыка
+и исключать приложение из сканирования. Полный путь ярлыка показывается до
+сохранения; приложения не перемещаются. Перемещения старых ярлыков требуют
+подтверждения и обратимы. Кнопка «Категории» управляет категориями.
 
 ПАПКИ И ТИПЫ
 Кнопка «Папки и типы» позволяет выбрать расположение папок,
@@ -1403,6 +1466,18 @@ class Main(ctk.CTk):
         )
         self.btn_scan.pack(side="right", padx=(18, 0))
         ToolTip(self.btn_scan, "Проверить рабочий стол, загрузки и приложения")
+        self.scan_progress_frame = ctk.CTkFrame(content, fg_color="transparent")
+        self.scan_progress_label = ctk.CTkLabel(
+            self.scan_progress_frame,
+            text="Проверяю папки и приложения…",
+            text_color=MUTED,
+            anchor="w",
+        )
+        self.scan_progress_label.pack(fill="x", pady=(0, 4))
+        self.scan_progress = ctk.CTkProgressBar(
+            self.scan_progress_frame, mode="indeterminate", progress_color=ACCENT
+        )
+        self.scan_progress.pack(fill="x")
 
         stats = ctk.CTkFrame(content, fg_color="transparent")
         stats.pack(fill="x", pady=(0, 22))
@@ -1411,6 +1486,7 @@ class Main(ctk.CTk):
             ("screenshots", "Скриншоты", "Скриншоты"),
             ("installers", "Установщики", "Установщики"),
             ("files", "Файлы для сортировки", "Файлы"),
+            ("apps", "Ярлыки", "Приложения"),
         ):
             card = ctk.CTkFrame(
                 stats, fg_color=SURFACE, corner_radius=18,
@@ -1453,6 +1529,8 @@ class Main(ctk.CTk):
         )
         self.btn_undo.pack(side="left", padx=(18, 0))
         self.last_scan = None
+        self.scan_results = queue.SimpleQueue()
+        self.scan_running = False
         self._show_empty_state()
         self.protocol("WM_DELETE_WINDOW", self.close)
         if self.cfg["background_monitoring"]:
@@ -1462,6 +1540,7 @@ class Main(ctk.CTk):
         self.after(5000, self.run_screenshot_retention_check)
         self.after(5000, self.run_installer_retention_check)
         self.after(250, self._drain_monitor_events)
+        self.after(100, self._drain_scan_results)
 
     def _add_nav(self, parent, key, text, command):
         def navigate():
@@ -1522,6 +1601,30 @@ class Main(ctk.CTk):
         if not self.actions:
             self._show_empty_state()
             return
+        selection_bar = ctk.CTkFrame(self.list, fg_color="transparent")
+        selection_bar.pack(fill="x", pady=(0, 8))
+        ctk.CTkButton(
+            selection_bar,
+            text="Выбрать всё",
+            width=110,
+            height=30,
+            command=lambda: self._set_action_selection(True),
+        ).pack(side="left")
+        ctk.CTkButton(
+            selection_bar,
+            text="Снять выбор",
+            width=110,
+            height=30,
+            fg_color="transparent",
+            border_width=1,
+            border_color=BORDER,
+            text_color=MUTED,
+            command=lambda: self._set_action_selection(False),
+        ).pack(side="left", padx=8)
+        self.selection_summary = ctk.CTkLabel(
+            selection_bar, text="", text_color=MUTED, anchor="e"
+        )
+        self.selection_summary.pack(side="right", fill="x", expand=True)
 
         groups = (
             ("screenshots", "Скриншоты", "▧"),
@@ -1586,8 +1689,8 @@ class Main(ctk.CTk):
                         ),
                     ).pack(side="right", padx=(8, 10))
                 destination = ctk.CTkLabel(
-                    line, text=f"→ {action['dst'].parent.name}",
-                    text_color=MUTED, anchor="e", width=120, font=("", 11),
+                    line, text=f"→ {action['dst']}",
+                    text_color=MUTED, anchor="e", width=280, font=("", 10),
                 )
                 destination.pack(side="right", padx=(8, 4))
                 action["_labels"] = [destination]
@@ -1600,11 +1703,12 @@ class Main(ctk.CTk):
         self.refresh_count()
 
     def _refresh_stats(self):
-        groups = ("screenshots", "installers", "files")
+        groups = ("screenshots", "installers", "files", "apps")
         captions = {
             "screenshots": "Скриншотов",
             "installers": "Установщиков",
             "files": "Файлов",
+            "apps": "Ярлыков",
         }
         for key in groups:
             selected = [
@@ -1627,6 +1731,16 @@ class Main(ctk.CTk):
                 total = sum(self._action_group(item) == self._action_group(action)
                             for item in self.actions)
                 badge.configure(text=f"{selected} / {total}")
+        if hasattr(self, "selection_summary") and self.selection_summary.winfo_exists():
+            selected = sum(action["var"].get() for action in self.actions)
+            self.selection_summary.configure(
+                text=f"Выбрано {selected} из {len(self.actions)}"
+            )
+
+    def _set_action_selection(self, selected: bool):
+        for action in self.actions:
+            action["var"].set(selected)
+        self.refresh_count()
 
     def settings_saved(self):
         self.status.configure(text="Настройки сохранены. Новые назначения будут показаны при следующем сканировании.")
@@ -1846,24 +1960,71 @@ class Main(ctk.CTk):
 
     # ---------- скан и предпросмотр ----------
     def scan(self):
+        if self.scan_running:
+            return
         self._set_active_nav("scan")
         self.status.configure(text="Сканирую…")
         self.update_idletasks()
         self.actions = []
         self.btn_apply.configure(state="disabled", text="Применить (0)")
         self._show_empty_state()
+        self.scan_running = True
+        self.btn_scan.configure(state="disabled")
+        for button in self.nav_buttons.values():
+            button.configure(state="disabled")
+        self.scan_progress_frame.pack(fill="x", pady=(0, 14), before=self.list)
+        self.scan_progress.start()
+        cfg_snapshot = copy.deepcopy(self.cfg)
+        history_snapshot = [dict(entry) for entry in self.history]
+
+        def run_scan():
+            try:
+                result = (build_actions(cfg_snapshot, history_snapshot), None)
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                RuntimeError,
+                subprocess.SubprocessError,
+            ) as exc:
+                result = (None, exc)
+            except Exception as exc:
+                logger.exception("Unexpected error while preparing scan preview")
+                result = (None, exc)
+            self.scan_results.put(result)
+
+        threading.Thread(target=run_scan, daemon=True).start()
+
+    def _drain_scan_results(self):
         try:
-            self.actions = build_actions(self.cfg, self.history)
-        except (OSError, TypeError, ValueError) as exc:
+            actions, error = self.scan_results.get_nowait()
+        except queue.Empty:
+            self.after(100, self._drain_scan_results)
+            return
+        self.scan_running = False
+        self.scan_progress.stop()
+        self.scan_progress_frame.pack_forget()
+        self.btn_scan.configure(state="normal")
+        for button in self.nav_buttons.values():
+            button.configure(state="normal")
+        if error is not None:
             self.status.configure(text="Не удалось безопасно подготовить предпросмотр.")
             self.scan_summary.configure(text="Сканирование не удалось")
             self._refresh_stats()
-            messagebox.showerror("Ошибка предпросмотра", str(exc), parent=self)
+            messagebox.showerror("Ошибка предпросмотра", str(error), parent=self)
             self.after_idle(self.show_next_screenshot_preview)
+            self.after(100, self._drain_scan_results)
             return
+        self.actions = actions
+        self._complete_scan()
+        self.after(100, self._drain_scan_results)
+
+    def _complete_scan(self):
         self.last_scan = datetime.now()
         if not self.actions:
-            self.status.configure(text="Порядок: действий нет.")
+            self.status.configure(
+                text="Порядок: действий нет — рабочий стол уже чист! ✨"
+            )
             self.scan_summary.configure(
                 text=f"Последняя проверка: сегодня в {self.last_scan:%H:%M} · новых действий нет"
             )
@@ -1897,12 +2058,12 @@ class Main(ctk.CTk):
             for other in self.actions
             if other is not action and other["kind"] in {"alias", "alias_move"}
         }
-        destination = organization.app_destination(
-            config.APPS_ROOT,
+        destination = app_destination_for(
+            self.cfg,
+            action.get("_app_key", action.get("app", "")),
+            action.get("app", ""),
             category,
             apps.get_app_name(action["src"]),
-            pt.IS_MAC,
-            pt.IS_LINUX,
         )
         if action["kind"] == "alias_move" and destination == action["src"]:
             action["dst"] = destination
@@ -1928,15 +2089,29 @@ class Main(ctk.CTk):
         verb = "Переместить ярлык" if action["kind"] == "alias_move" else "Создать ярлык"
         action["desc"] = f"{verb}: {action['src']}  →  {destination}"
         for label in action.get("_labels", []):
-            label.configure(text=f"→ {destination.parent.name}")
+            label.configure(text=f"→ {destination}")
         self.refresh_count()
 
     # ---------- применение и откат ----------
     def apply(self):
-        n = sum(1 for a in self.actions if a["var"].get())
+        selected = [action for action in self.actions if action["var"].get()]
+        n = len(selected)
         if n == 0:
             return
-        if not messagebox.askyesno("Подтверждение", f"Выполнить действий: {n}?"):
+        destinations = "\n".join(
+            action["desc"] for action in selected[:8]
+        )
+        if len(selected) > 8:
+            destinations += f"\n… и ещё {len(selected) - 8} действий."
+        confirmation = (
+            f"Выполнить действий: {n}?\n\n{destinations}\n\n"
+            "Папки назначения будут созданы при необходимости. "
+            "Установщики перемещаются в обратимый архив; установленные приложения "
+            "не перемещаются. Перед применением пути будут проверены повторно."
+        )
+        if not messagebox.askyesno(
+            "Подтверждение действий", confirmation, parent=self
+        ):
             return
         try:
             done = apply_actions(self.actions, self.history, self.cfg)
@@ -1949,7 +2124,9 @@ class Main(ctk.CTk):
         self.btn_apply.configure(state="disabled", text="Применить (0)")
         self.scan_summary.configure(text="Сканирование завершено")
         if done == n:
-            self.status.configure(text=f"Готово: выполнено {done} действий.")
+            self.status.configure(
+                text=f"Порядок наведён! ✨ Выполнено действий: {done}."
+            )
             notify.notify(f"Уборка завершена: выполнено действий — {done}")
         else:
             self.status.configure(
@@ -2154,11 +2331,7 @@ class Main(ctk.CTk):
                             *map(Path, self.cfg["managed_roots"]["files"]),
                         ],
                         "alias_destinations": [
-                            config.APPS_ROOT,
-                            organization.default_locations(
-                                config.DESKTOP, self.cfg["folders"]
-                            )["apps"],
-                            *map(Path, self.cfg["managed_roots"]["apps"]),
+                            *app_roots_for(self.cfg),
                         ],
                         "rollback_roots": [config.DATA_DIR],
                     },
@@ -2418,22 +2591,60 @@ class Main(ctk.CTk):
         aliases = organization.active_aliases(self.history)
         win = ctk.CTkToplevel(self)
         win.title("Категории приложений")
-        win.geometry("760x560")
+        win.geometry("980x720")
+        win.minsize(820, 560)
         win.transient(self)
         win.grab_set()
         ctk.CTkLabel(
             win,
-            text="Выбери папку для каждого приложения. Перемещения появятся в предпросмотре.",
+            text=(
+                "Назначай категории или отдельные папки для ярлыков. "
+                "Сами установленные приложения не перемещаются."
+            ),
             anchor="w",
-            wraplength=700,
+            wraplength=920,
         ).pack(fill="x", padx=14, pady=(14, 8))
+        toolbar = ctk.CTkFrame(win, fg_color="transparent")
+        toolbar.pack(fill="x", padx=14, pady=(0, 6))
+        search = ctk.CTkEntry(
+            toolbar, placeholder_text="Поиск по приложению или пути…"
+        )
+        search.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        categories = list(self.cfg["categories"])
+        filter_var = ctk.StringVar(value="Все категории")
+        filter_menu = ctk.CTkOptionMenu(
+            toolbar,
+            values=["Все категории", *categories],
+            variable=filter_var,
+            width=170,
+        )
+        filter_menu.pack(side="left")
+
+        bulk = ctk.CTkFrame(win, fg_color="transparent")
+        bulk.pack(fill="x", padx=14, pady=(0, 6))
+        bulk_category = ctk.StringVar(value=categories[0] if categories else "Другое")
+        ctk.CTkOptionMenu(
+            bulk, values=categories, variable=bulk_category, width=160
+        ).pack(side="left")
+        favorite_folders = self.cfg.get("favorite_app_folders", [])
+        favorite_options = ["Выбрать избранную папку", *favorite_folders]
+        favorite_var = ctk.StringVar(value=favorite_options[0])
+        favorite_menu = ctk.CTkOptionMenu(
+            bulk,
+            values=favorite_options,
+            variable=favorite_var,
+            width=240,
+        )
+        favorite_menu.pack(side="left", padx=8)
+        bulk_status = ctk.CTkLabel(bulk, text="", text_color=MUTED, anchor="e")
+        bulk_status.pack(side="right", fill="x", expand=True)
         rows = ctk.CTkScrollableFrame(win, label_text="Найденные приложения")
         rows.pack(fill="both", expand=True, padx=14, pady=6)
-        assignments = {}
-        categories = list(self.cfg["categories"])
+        records = []
         for app in installed:
             name = apps.get_app_name(app)
             bundle_id = apps.get_bundle_id(app)
+            identity = bundle_id or name
             previous = aliases.get(str(app.resolve()))
             selected = (
                 self.cfg["app_categories"].get(bundle_id)
@@ -2444,31 +2655,278 @@ class Main(ctk.CTk):
             )
             if selected not in categories:
                 selected = "Другое"
-            row = ctk.CTkFrame(rows, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=3)
-            ctk.CTkLabel(
-                row, text=name, width=190, anchor="w"
-            ).pack(side="left", padx=(0, 8))
-            ctk.CTkLabel(
-                row, text=str(app), anchor="w", text_color="#9a9a9a"
-            ).pack(side="left", fill="x", expand=True, padx=(0, 8))
-            variable = ctk.StringVar(value=selected)
-            ctk.CTkOptionMenu(
-                row, values=categories, variable=variable, width=150
-            ).pack(side="right")
-            assignments[bundle_id or name] = variable
+            records.append({
+                "app": app,
+                "name": name,
+                "bundle_id": bundle_id,
+                "identity": identity,
+                "category": ctk.StringVar(value=selected),
+                "custom_root": ctk.StringVar(
+                    value=self.cfg.get("app_locations", {}).get(identity, "")
+                ),
+                "include": ctk.BooleanVar(
+                    value=identity not in self.cfg.get("excluded_apps", [])
+                    and name not in self.cfg.get("excluded_apps", [])
+                ),
+                "selected": ctk.BooleanVar(value=False),
+            })
+
+        def destination_for(record):
+            custom_root = record["custom_root"].get().strip()
+            if custom_root:
+                root = organization.validate_custom_root(custom_root, config.HOME)
+                return organization.app_shortcut_destination(
+                    root, record["name"], pt.IS_MAC, pt.IS_LINUX
+                )
+            return organization.app_destination(
+                config.APPS_ROOT,
+                record["category"].get(),
+                record["name"],
+                pt.IS_MAC,
+                pt.IS_LINUX,
+            )
+
+        def render_rows(*_):
+            for child in rows.winfo_children():
+                child.destroy()
+            term = search.get().strip().casefold()
+            category_filter = filter_var.get()
+            visible = 0
+            for record in records:
+                app = record["app"]
+                name = record["name"]
+                category = record["category"].get()
+                if category_filter != "Все категории" and category != category_filter:
+                    continue
+                if term and term not in name.casefold() and term not in str(app).casefold():
+                    continue
+                visible += 1
+                card = ctk.CTkFrame(
+                    rows,
+                    fg_color=SURFACE,
+                    corner_radius=10,
+                    border_width=1,
+                    border_color=BORDER,
+                )
+                card.pack(fill="x", padx=4, pady=4)
+                first = ctk.CTkFrame(card, fg_color="transparent")
+                first.pack(fill="x", padx=8, pady=(6, 2))
+                ctk.CTkCheckBox(
+                    first,
+                    text="",
+                    width=22,
+                    variable=record["selected"],
+                    command=lambda: bulk_status.configure(
+                        text=f"Показано {visible_count()} из {len(records)} · "
+                        f"выбрано {sum(item['selected'].get() for item in records)}"
+                    ),
+                ).pack(side="left", padx=(0, 4))
+                ctk.CTkLabel(
+                    first, text=name, width=190, anchor="w", font=("", 12, "bold")
+                ).pack(side="left", padx=(0, 8))
+                ctk.CTkCheckBox(
+                    first, text="Включено в сканирование", variable=record["include"],
+                    width=175,
+                ).pack(side="left", padx=(0, 8))
+                ctk.CTkOptionMenu(
+                    first,
+                    values=categories,
+                    variable=record["category"],
+                    width=170,
+                    command=lambda _value: render_rows(),
+                ).pack(side="right")
+                second = ctk.CTkFrame(card, fg_color="transparent")
+                second.pack(fill="x", padx=12, pady=(0, 7))
+                ctk.CTkLabel(
+                    second,
+                    text=f"Установлено: {app}",
+                    text_color=MUTED,
+                    anchor="w",
+                    font=("", 10),
+                ).pack(fill="x")
+                controls = ctk.CTkFrame(second, fg_color="transparent")
+                controls.pack(fill="x", pady=(2, 0))
+                ctk.CTkLabel(
+                    controls,
+                    text=f"Ярлык: {destination_for(record)}",
+                    text_color=ACCENT,
+                    anchor="w",
+                    font=("", 10),
+                ).pack(side="left", fill="x", expand=True)
+
+                def browse(selected=record):
+                    initial_text = selected["custom_root"].get().strip()
+                    initial = Path(initial_text) if initial_text else config.HOME
+                    if not initial.is_dir():
+                        initial = initial.parent if initial.parent.is_dir() else config.HOME
+                    chosen = filedialog.askdirectory(
+                        parent=win,
+                        title=f"Папка ярлыка для {selected['name']}",
+                        initialdir=str(initial),
+                        mustexist=True,
+                    )
+                    if not chosen:
+                        return
+                    try:
+                        root = organization.validate_custom_root(chosen, config.HOME)
+                        if organization.is_excluded_path(
+                            root, config.EXCLUDED_FOLDERS
+                        ):
+                            raise ValueError("Нельзя назначить защищённую папку.")
+                    except ValueError as exc:
+                        messagebox.showerror("Недопустимая папка", str(exc), parent=win)
+                        return
+                    selected["custom_root"].set(str(root))
+                    render_rows()
+
+                ctk.CTkButton(
+                    controls, text="Папка…", width=76, height=26, command=browse
+                ).pack(side="right", padx=(6, 0))
+                ctk.CTkButton(
+                    controls,
+                    text="Сброс",
+                    width=58,
+                    height=26,
+                    fg_color="transparent",
+                    border_width=1,
+                    border_color=BORDER,
+                    text_color=MUTED,
+                    command=lambda selected=record: (
+                        selected["custom_root"].set(""),
+                        render_rows(),
+                    ),
+                ).pack(side="right")
+            bulk_status.configure(
+                text=f"Показано {visible} из {len(records)} · "
+                f"выбрано {sum(record['selected'].get() for record in records)}"
+            )
+
+        def selected_records():
+            return [record for record in records if record["selected"].get()]
+
+        def visible_count():
+            return sum(
+                (
+                    filter_var.get() == "Все категории"
+                    or record["category"].get() == filter_var.get()
+                )
+                and (
+                    not search.get().strip()
+                    or search.get().strip().casefold() in record["name"].casefold()
+                    or search.get().strip().casefold() in str(record["app"]).casefold()
+                )
+                for record in records
+            )
+
+        def assign_category():
+            selected = selected_records()
+            if not selected:
+                bulk_status.configure(text="Сначала отметь приложения слева.")
+                return
+            for record in selected:
+                record["category"].set(bulk_category.get())
+            render_rows()
+
+        def assign_favorite_folder():
+            folder = favorite_var.get()
+            if folder not in favorite_folders:
+                bulk_status.configure(text="Сначала выбери папку из избранного.")
+                return
+            selected = selected_records()
+            if not selected:
+                bulk_status.configure(text="Сначала отметь приложения слева.")
+                return
+            for record in selected:
+                record["custom_root"].set(folder)
+            render_rows()
+
+        def add_favorite_folder():
+            chosen = next(
+                (
+                    record["custom_root"].get().strip()
+                    for record in selected_records()
+                    if record["custom_root"].get().strip()
+                ),
+                str(config.APPS_ROOT),
+            )
+            try:
+                folder = str(organization.validate_custom_root(chosen, config.HOME))
+                if organization.is_excluded_path(folder, config.EXCLUDED_FOLDERS):
+                    raise ValueError("Защищённую папку нельзя добавить в избранное.")
+                updated = copy.deepcopy(self.cfg)
+                updated.setdefault("favorite_app_folders", [])
+                if folder not in updated["favorite_app_folders"]:
+                    updated["favorite_app_folders"].append(folder)
+                utils.save_json(config.CONFIG_PATH, updated)
+            except (OSError, TypeError, ValueError) as exc:
+                messagebox.showerror("Избранные папки", str(exc), parent=win)
+                return
+            self.cfg.clear()
+            self.cfg.update(updated)
+            favorite_folders[:] = updated["favorite_app_folders"]
+            options = ["Выбрать избранную папку", *favorite_folders]
+            favorite_menu.configure(values=options)
+            favorite_var.set(folder)
+
+        ctk.CTkButton(
+            bulk, text="Категорию выбранным", width=165, command=assign_category
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bulk, text="Папку выбранным", width=145, command=assign_favorite_folder
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bulk, text="☆ В избранное", width=125, command=add_favorite_folder
+        ).pack(side="left", padx=(8, 0))
+        search.bind("<KeyRelease>", render_rows)
+        filter_menu.configure(command=lambda _value: render_rows())
+        render_rows()
 
         def save():
-            for name, variable in assignments.items():
-                self.cfg["app_categories"][name] = variable.get()
+            updated = copy.deepcopy(self.cfg)
+            updated.setdefault("app_categories", {})
+            updated.setdefault("app_locations", {})
+            excluded = set(updated.get("excluded_apps", []))
             try:
-                utils.save_json(config.CONFIG_PATH, self.cfg)
+                for record in records:
+                    identity = record["identity"]
+                    updated["app_categories"][identity] = record["category"].get()
+                    custom_root = record["custom_root"].get().strip()
+                    if custom_root:
+                        root = organization.validate_custom_root(
+                            custom_root, config.HOME
+                        )
+                        if organization.is_excluded_path(root, config.EXCLUDED_FOLDERS):
+                            raise ValueError(
+                                f"Назначение попало в защищённую папку: {root}"
+                            )
+                        updated["app_locations"][identity] = str(root)
+                        managed_roots = updated.setdefault(
+                            "managed_roots",
+                            {key: [] for key in organization.LOCATION_KEYS},
+                        )
+                        roots_for_apps = managed_roots.setdefault("apps", [])
+                        if str(root) not in roots_for_apps:
+                            roots_for_apps.append(str(root))
+                    else:
+                        updated["app_locations"].pop(identity, None)
+                    if record["include"].get():
+                        excluded.discard(identity)
+                        excluded.discard(record["name"])
+                    else:
+                        excluded.add(identity)
+                updated["excluded_apps"] = sorted(excluded)
+                utils.save_json(config.CONFIG_PATH, updated)
             except (OSError, TypeError, ValueError) as exc:
                 messagebox.showerror("Ошибка сохранения", str(exc), parent=win)
                 return
+            self.cfg.clear()
+            self.cfg.update(updated)
             win.destroy()
             self.status.configure(
-                text="Назначения сохранены. Нажми «Сканировать систему», чтобы увидеть перемещения."
+                text=(
+                    "Назначения сохранены. Проверь показанные пути при следующем "
+                    "сканировании — приложения не перемещаются."
+                )
             )
 
         buttons = ctk.CTkFrame(win, fg_color="transparent")

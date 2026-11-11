@@ -30,6 +30,8 @@ Automatic desktop organizer for macOS and Windows, with initial Linux support.
 - Creates shortcuts/aliases for applications organized by category (Browsers, Social, Programming, Games, etc.)
 - Scans nested application groups inside standard macOS Applications folders and nested Windows Start Menu folders
 - Assign categories to installed applications and adjust individual choices in the action preview
+- Search and filter installed applications, assign categories or favorite folders in bulk, and preview each exact shortcut destination
+- Choose an individual shortcut folder for an app or exclude it from future scans; custom folders must stay inside your home folder
 - Reclassify existing shortcuts through a previewed, reversible move
 - Remembers application category choices for future scans
 - Organizes shortcuts only; installed application bundles are never moved
@@ -78,8 +80,8 @@ Installer auto-archiving is disabled by default. Choose a delay in Settings; aft
 ## Usage
 
 ### Main Interface
-- **Scan System**: Shows proposed actions grouped by file type in the dashboard
-- **Apply**: Executes checked actions after confirmation
+- **Scan System**: Shows progress while preparing proposed actions grouped by type
+- **Apply**: Shows concrete source and destination paths, then executes checked actions after confirmation and revalidates the paths
 - **Theme**: Switch between light and dark mode; your choice is saved
 - **Rollback Actions**: Restores selected files or all reversible recorded changes; generated shortcuts are archived, not permanently deleted
 - **Monitoring**: Preview and approve each new screenshot before it is moved
@@ -88,7 +90,8 @@ Installer auto-archiving is disabled by default. Choose a delay in Settings; aft
 
 ### Categories
 - Add custom categories for applications
-- Use **Applications** to assign categories and the action preview to change or confirm placements
+- Use **Applications** to search and filter apps, select several at once, assign categories or favorite folders, choose per-app shortcut folders, and exclude apps from scanning
+- Shortcut-folder changes appear with their full destination in the next action preview; installed application bundles are never moved
 - Editable through GUI or `config.json`
 
 ### Configuration

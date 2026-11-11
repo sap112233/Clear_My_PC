@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -99,6 +100,50 @@ class PlanningTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Тема должна быть"):
                     gui.load_cfg()
 
+    def test_gui_validates_saved_app_shortcut_folders_and_favorites(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            desktop = home / "Desktop"
+            desktop.mkdir()
+            settings_path = home / "settings.json"
+            app_folder = home / "Favorites" / "Editors"
+            favorite_folder = home / "Favorites"
+            settings_path.write_text(
+                json.dumps({
+                    "app_locations": {"com.example.editor": str(app_folder)},
+                    "favorite_app_folders": [str(favorite_folder)],
+                    "excluded_apps": ["com.example.legacy"],
+                }),
+                encoding="utf-8",
+            )
+            patches = (
+                mock.patch.object(gui.config, "HOME", home),
+                mock.patch.object(gui.config, "DESKTOP", desktop),
+                mock.patch.object(gui.config, "CONFIG_PATH", settings_path),
+            )
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                loaded = gui.load_cfg()
+
+            self.assertEqual(loaded["app_locations"]["com.example.editor"], str(app_folder.resolve()))
+            self.assertEqual(loaded["favorite_app_folders"], [str(favorite_folder.resolve())])
+            self.assertEqual(loaded["excluded_apps"], ["com.example.legacy"])
+
+            settings_path.write_text(
+                json.dumps({
+                    "app_locations": {
+                        "com.example.editor": str(Path(temp_dir).parent / "Outside")
+                    }
+                }),
+                encoding="utf-8",
+            )
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                with self.assertRaisesRegex(ValueError, "внутри домашней"):
+                    gui.load_cfg()
+
     def test_preview_uses_custom_file_types_and_selected_app_category(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             home = Path(temp_dir)
@@ -138,6 +183,53 @@ class PlanningTests(unittest.TestCase):
             )
             self.assertEqual(app_action["dst"], (home / "Shortcuts" / "Разработка" / "Editor.lnk").resolve())
             self.assertEqual(app_action["_category"], "Разработка")
+
+    def test_preview_uses_per_app_shortcut_folder_and_respects_app_exclusion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            desktop = home / "Desktop"
+            desktop.mkdir()
+            app = home / "Applications" / "Editor.app"
+            app.mkdir(parents=True)
+            custom_shortcuts = home / "Favorites" / "Editors"
+            cfg = configuration(home)
+            cfg["features"]["sort_files"] = False
+            cfg["app_locations"] = {
+                "com.example.editor": str(custom_shortcuts),
+            }
+            patches = (
+                mock.patch.object(gui.config, "HOME", home),
+                mock.patch.object(gui.config, "DESKTOP", desktop),
+                mock.patch.object(gui.config, "STATE_PATH", home / "state.json"),
+                mock.patch.object(gui.utils, "load_json", return_value={"processed": []}),
+                mock.patch.object(gui.shots, "collect", return_value=[]),
+                mock.patch.object(gui.apps, "scan_applications", return_value=[app]),
+                mock.patch.object(gui.apps, "get_app_name", return_value="Editor"),
+                mock.patch.object(
+                    gui.apps, "get_bundle_id", return_value="com.example.editor"
+                ),
+                mock.patch.object(gui.pt, "IS_MAC", False),
+                mock.patch.object(gui.pt, "IS_LINUX", False),
+            )
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                actions = gui.build_actions(cfg)
+
+            app_action = next(action for action in actions if action["kind"] == "alias")
+            self.assertEqual(
+                app_action["dst"], custom_shortcuts.resolve() / "Editor.lnk"
+            )
+            self.assertEqual(
+                app_action["_destination_root_path"], custom_shortcuts.resolve()
+            )
+
+            cfg["excluded_apps"] = ["com.example.editor"]
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                actions = gui.build_actions(cfg)
+            self.assertFalse(any(action["kind"] == "alias" for action in actions))
 
     def test_preview_proposes_reversible_reclassification_of_existing_shortcut(self):
         with tempfile.TemporaryDirectory() as temp_dir:

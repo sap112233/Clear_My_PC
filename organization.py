@@ -233,6 +233,19 @@ def app_destination(
     return destination
 
 
+def app_shortcut_destination(
+    folder: Path,
+    app_name: str,
+    is_mac: bool,
+    is_linux: bool = False,
+) -> Path:
+    destination = utils.safe_child_path(folder, utils.sanitize(app_name))
+    if not is_mac:
+        extension = ".desktop" if is_linux else ".lnk"
+        destination = destination.with_name(f"{destination.name}{extension}")
+    return destination
+
+
 def active_aliases(history: list[dict]) -> dict[str, dict]:
     aliases = {}
     for entry in history:

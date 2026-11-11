@@ -86,6 +86,10 @@ def create_alias(app_path: Path, category: str) -> Path | None:
     alias_path = organization.app_destination(
         config.APPS_ROOT, category, get_app_name(app_path), pt.IS_MAC, pt.IS_LINUX
     )
+    return create_alias_at(app_path, alias_path)
+
+
+def create_alias_at(app_path: Path, alias_path: Path) -> Path | None:
     if organization.is_excluded_path(alias_path, config.EXCLUDED_FOLDERS):
         print(f"  Пропускаю: папка назначения защищена: {alias_path}")
         return None
@@ -101,6 +105,24 @@ def create_alias(app_path: Path, category: str) -> Path | None:
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
         print(f"  Ошибка создания ярлыка: {e}")
         return None
+
+
+def application_destination(
+    app_key: str,
+    app_name: str,
+    category: str,
+    display_name: str,
+    app_locations: dict,
+) -> Path:
+    custom_root = app_locations.get(app_key) or app_locations.get(app_name)
+    if custom_root:
+        root = organization.validate_custom_root(custom_root, config.HOME)
+        return organization.app_shortcut_destination(
+            root, display_name, pt.IS_MAC, pt.IS_LINUX
+        )
+    return organization.app_destination(
+        config.APPS_ROOT, category, display_name, pt.IS_MAC, pt.IS_LINUX
+    )
 
 
 def quarantine_installer(path: Path, history: list, destination: Path | None = None) -> bool:
@@ -214,6 +236,18 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         for app_name, category in app_categories.items()
     ):
         raise ValueError("Назначения приложений должны ссылаться на существующие категории.")
+    app_locations = config_data.get("app_locations", {})
+    if not isinstance(app_locations, dict) or any(
+        not isinstance(app_key, str) or not app_key
+        for app_key in app_locations
+    ):
+        raise ValueError("Пути ярлыков приложений заданы неверно.")
+    excluded_apps = config_data.get("excluded_apps", [])
+    if not isinstance(excluded_apps, list) or any(
+        not isinstance(app_name, str) or not app_name
+        for app_name in excluded_apps
+    ):
+        raise ValueError("Список исключённых приложений задан неверно.")
     
     # Сканируем приложения
     apps = scan_applications()
@@ -224,6 +258,9 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
     for app in apps:
         bundle_id = get_bundle_id(app)
         app_name = get_app_name(app)
+        app_key = bundle_id or app_name
+        if app_key in excluded_apps or app_name in excluded_apps:
+            continue
         
         # Проверяем, обработано ли уже
         if app_name in state["processed"] or bundle_id in state["processed"]:
@@ -234,13 +271,17 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
         if not category and not dry_run:
             category = ask_category(app_name, categories)
         category = category or "Утилиты"
-        dst = organization.app_destination(
-            config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
+        dst = application_destination(
+            app_key,
+            app_name,
+            category,
+            get_app_name(app),
+            app_locations,
         )
         if organization.is_excluded_path(dst, config.EXCLUDED_FOLDERS):
             print(f"[skip] Папка назначения защищена: {dst}")
             continue
-        new_apps.append((app, app_name, bundle_id, category))
+        new_apps.append((app, app_name, bundle_id, category, dst))
     
     if not new_apps:
         print("Нет новых приложений для обработки.")
@@ -250,18 +291,12 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
     
     if dry_run:
         print("\nПредпросмотр (dry run):")
-        for app, app_name, bundle_id, category in new_apps:
-            destination = organization.app_destination(
-                config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
-            )
+        for app, app_name, bundle_id, category, destination in new_apps:
             print(f"  Создать ярлык: {app} → {destination}")
         return False
 
     print("\nПредпросмотр действий:")
-    for app, app_name, bundle_id, category in new_apps:
-        destination = organization.app_destination(
-            config.APPS_ROOT, category, get_app_name(app), pt.IS_MAC, pt.IS_LINUX
-        )
+    for app, app_name, bundle_id, category, destination in new_apps:
         print(f"  Создать ярлык: {app} → {destination}")
     if input("\nСоздать эти ярлыки? [y/N] ").strip().lower() != "y":
         print("Отменено.")
@@ -270,11 +305,11 @@ def process_applications(history: list, dry_run: bool = False) -> bool:
     # Обрабатываем каждое приложение
     batch = uuid.uuid4().hex
     created = 0
-    for app, app_name, bundle_id, category in new_apps:
+    for app, app_name, bundle_id, category, destination in new_apps:
         print(f"\nОбработка: {app_name}")
 
         # Создаём алиас
-        alias_path = create_alias(app, category)
+        alias_path = create_alias_at(app, destination)
         if alias_path is None:
             continue
         created += 1

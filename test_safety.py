@@ -24,6 +24,35 @@ def allowed_roots(root):
 
 
 class SafetyTests(unittest.TestCase):
+    def test_cli_app_processing_respects_apps_excluded_in_the_gui(self):
+        import config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            app = root / "Applications" / "Example.app"
+            app.mkdir(parents=True)
+            state_path = root / "state.json"
+            config_path = root / "config.json"
+            state_path.write_text('{"processed": []}', encoding="utf-8")
+            config_path.write_text(
+                json.dumps({
+                    "categories": {"Утилиты": [], "Другое": []},
+                    "excluded_apps": ["com.example.app"],
+                }),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(config, "STATE_PATH", state_path), mock.patch.object(
+                config, "CONFIG_PATH", config_path
+            ), mock.patch.object(config, "EXCLUDED_FOLDERS", []), mock.patch.object(
+                app_handler, "scan_applications", return_value=[app]
+            ), mock.patch.object(
+                app_handler, "get_app_name", return_value="Example"
+            ), mock.patch.object(
+                app_handler, "get_bundle_id", return_value="com.example.app"
+            ):
+                self.assertFalse(app_handler.process_applications([], dry_run=True))
+
     def test_linux_notifications_use_notify_send_without_a_shell(self):
         with mock.patch.object(notify.pt, "IS_LINUX", True), mock.patch.object(
             notify.pt, "IS_MAC", False
