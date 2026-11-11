@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest import mock
 from pathlib import Path
 
@@ -51,7 +53,10 @@ class SafetyTests(unittest.TestCase):
             ), mock.patch.object(
                 app_handler, "get_bundle_id", return_value="com.example.app"
             ):
-                self.assertFalse(app_handler.process_applications([], dry_run=True))
+                with redirect_stdout(io.StringIO()):
+                    self.assertFalse(
+                        app_handler.process_applications([], dry_run=True)
+                    )
 
     def test_linux_notifications_use_notify_send_without_a_shell(self):
         with mock.patch.object(notify.pt, "IS_LINUX", True), mock.patch.object(
