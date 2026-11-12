@@ -67,6 +67,7 @@ class PlanningTests(unittest.TestCase):
             self.assertIn("Графика/дизайн", gui_settings["categories"])
             self.assertEqual(gui_settings["theme"], "light")
             self.assertIn("Другое", gui_settings["categories"])
+            self.assertEqual(gui_settings["work_profiles"], [])
             self.assertEqual(cli_settings["layout_mode"], "automatic")
             self.assertEqual(gui.config.APPS_ROOT, (desktop / "Apps").resolve())
             self.assertEqual(gui_settings["screenshot_retention_minutes"], 0)
@@ -74,6 +75,49 @@ class PlanningTests(unittest.TestCase):
             self.assertFalse(gui_settings["background_monitoring"])
             self.assertEqual(gui_settings["pending_installer_cleanup"], [])
             self.assertEqual(cli_settings["screenshot_retention_minutes"], 0)
+
+    def test_gui_loads_valid_work_profiles_and_rejects_unsafe_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            desktop = home / "Desktop"
+            desktop.mkdir()
+            settings_path = home / "settings.json"
+            settings_path.write_text(
+                json.dumps({
+                    "work_profiles": [{
+                        "name": "Дизайн",
+                        "apps": [],
+                        "websites": [{
+                            "name": "Pinterest",
+                            "url": "https://pinterest.com/",
+                        }],
+                    }]
+                }),
+                encoding="utf-8",
+            )
+            patches = (
+                mock.patch.object(gui.config, "HOME", home),
+                mock.patch.object(gui.config, "DESKTOP", desktop),
+                mock.patch.object(gui.config, "CONFIG_PATH", settings_path),
+            )
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                self.assertEqual(gui.load_cfg()["work_profiles"][0]["name"], "Дизайн")
+                settings_path.write_text(
+                    json.dumps({
+                        "work_profiles": [{
+                            "name": "Bad",
+                            "websites": [{
+                                "name": "Bad URL",
+                                "url": "javascript:alert(1)",
+                            }],
+                        }]
+                    }),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "http://"):
+                    gui.load_cfg()
 
     def test_gui_restores_saved_theme_and_rejects_unknown_theme(self):
         with tempfile.TemporaryDirectory() as temp_dir:

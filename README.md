@@ -36,6 +36,11 @@ Automatic desktop organizer for macOS and Windows, with initial Linux support.
 - Remembers application category choices for future scans
 - Organizes shortcuts only; installed application bundles are never moved
 
+### 🧰 Work Profiles
+- Create named profiles containing installed applications and websites
+- Start a profile with one click to launch its apps and open its links in your default browser
+- Profiles are saved locally and can be edited or deleted at any time
+
 ### 🗑️ Automatic Cleanup
 - Finds common installers (.dmg, .pkg, .exe, .msi, .deb, .rpm, .AppImage, .zip)
 - Moves installers to a private, reversible quarantine instead of deleting them
@@ -87,12 +92,19 @@ Installer auto-archiving is disabled by default. Choose a delay in Settings; aft
 - **Monitoring**: Preview and approve each new screenshot before it is moved
 - **Autostart**: Launch DesktopKeeper on system boot
 - **Folders and Types**: Select destinations, enable file groups, and define custom extension rules
+- **Work Profiles**: Create or edit profiles, choose installed apps, add `http://` or `https://` websites, and launch the selected set together
 
 ### Categories
 - Add custom categories for applications
 - Use **Applications** to search and filter apps, select several at once, assign categories or favorite folders, choose per-app shortcut folders, and exclude apps from scanning
 - Shortcut-folder changes appear with their full destination in the next action preview; installed application bundles are never moved
 - Editable through GUI or `config.json`
+
+### Work Profiles
+- Open **Work Profiles** and create a named profile
+- Select applications from the installed-app list and add websites with their full `https://` or `http://` addresses
+- Use **Launch** to open every selected app and site; if an item is unavailable, the app reports it while continuing with the rest
+- Profiles are stored in the local `work_profiles` setting in `config.json`
 
 ### Configuration
 Settings are stored in:

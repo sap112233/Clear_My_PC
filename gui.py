@@ -31,6 +31,7 @@ import platform_tools as pt
 import screenshot_handler as shots
 import updater
 import utils
+import work_profiles as profiles
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,9 @@ def load_cfg() -> dict:
         str(organization.validate_custom_root(path, config.HOME))
         for path in cfg["favorite_app_folders"]
     ))
+    cfg["work_profiles"] = profiles.validate_profiles(
+        cfg.setdefault("work_profiles", [])
+    )
     cfg.setdefault("custom_file_types", {})
     cfg.setdefault(
         "enabled_types",
@@ -1119,6 +1123,10 @@ HELP_TEXT = """КАК ПОЛЬЗОВАТЬСЯ DesktopKeeper
 сохранения; приложения не перемещаются. Перемещения старых ярлыков требуют
 подтверждения и обратимы. Кнопка «Категории» управляет категориями.
 
+РАБОЧИЕ ПРОФИЛИ
+Создай профиль, выбери установленные приложения и добавь сайты с адресами
+http:// или https://. Кнопка «Запустить» открывает все выбранные элементы.
+
 ПАПКИ И ТИПЫ
 Кнопка «Папки и типы» позволяет выбрать расположение папок,
 включить нужные типы файлов и добавить собственную категорию
@@ -1362,6 +1370,325 @@ class Wizard(ctk.CTk):
                 variable.set(type_name[5:] in self.cfg["enabled_types"])
 
 
+class WorkProfileEditor(ctk.CTkToplevel):
+   def __init__(self, parent, profile: dict | None, applications: list, on_save):
+       super().__init__(parent)
+       self.on_save = on_save
+       self.title("Рабочий профиль")
+       self.geometry("760x700")
+       self.minsize(620, 560)
+       self.transient(parent)
+       self.grab_set()
+
+       self.name_var = ctk.StringVar(value=(profile or {}).get("name", ""))
+       self.selected_apps = {
+           application["path"] for application in (profile or {}).get("apps", [])
+       }
+       self.applications = list(applications)
+       known_paths = {path for _, path in self.applications}
+       for application in (profile or {}).get("apps", []):
+           if application["path"] not in known_paths:
+               self.applications.append(
+                   (f"{application['name']} — не найдено", application["path"])
+               )
+       self.websites = copy.deepcopy((profile or {}).get("websites", []))
+
+       ctk.CTkLabel(
+           self, text="Название профиля", font=("", 14, "bold")
+       ).pack(anchor="w", padx=16, pady=(16, 4))
+       ctk.CTkEntry(
+           self, textvariable=self.name_var, placeholder_text="Например, Дизайн"
+       ).pack(fill="x", padx=16)
+
+       ctk.CTkLabel(
+           self, text="Приложения", font=("", 14, "bold")
+       ).pack(anchor="w", padx=16, pady=(14, 4))
+       self.app_search = ctk.CTkEntry(
+           self, placeholder_text="Поиск установленных приложений…"
+       )
+       self.app_search.pack(fill="x", padx=16, pady=(0, 6))
+       self.app_search.bind("<KeyRelease>", lambda _event: self.render_applications())
+       self.application_rows = ctk.CTkScrollableFrame(self, height=210)
+       self.application_rows.pack(fill="both", expand=True, padx=16)
+       self.render_applications()
+
+       ctk.CTkLabel(
+           self, text="Сайты", font=("", 14, "bold")
+       ).pack(anchor="w", padx=16, pady=(12, 4))
+       site_form = ctk.CTkFrame(self, fg_color="transparent")
+       site_form.pack(fill="x", padx=16)
+       self.website_name = ctk.CTkEntry(
+           site_form, width=170, placeholder_text="Название сайта"
+       )
+       self.website_name.pack(side="left", padx=(0, 6))
+       self.website_url = ctk.CTkEntry(
+           site_form, placeholder_text="https://pinterest.com"
+       )
+       self.website_url.pack(side="left", fill="x", expand=True, padx=6)
+       ctk.CTkButton(
+           site_form, text="Добавить", width=90, command=self.add_website
+       ).pack(side="left", padx=(6, 0))
+       self.website_rows = ctk.CTkFrame(self, fg_color="transparent")
+       self.website_rows.pack(fill="x", padx=16, pady=(4, 0))
+       self.render_websites()
+
+       buttons = ctk.CTkFrame(self, fg_color="transparent")
+       buttons.pack(fill="x", padx=16, pady=14)
+       ctk.CTkButton(buttons, text="Сохранить профиль", command=self.save).pack(
+           side="left"
+       )
+       ctk.CTkButton(
+           buttons, text="Отмена", fg_color="#3a3a3a", command=self.destroy
+       ).pack(side="right")
+
+   def render_applications(self):
+       for widget in self.application_rows.winfo_children():
+           widget.destroy()
+       query = self.app_search.get().strip().casefold()
+       matches = [
+           (name, path)
+           for name, path in self.applications
+           if not query or query in name.casefold() or query in path.casefold()
+       ]
+       if not matches:
+           ctk.CTkLabel(
+               self.application_rows,
+               text="Подходящие приложения не найдены.",
+               text_color=MUTED,
+           ).pack(anchor="w", padx=8, pady=8)
+           return
+       for name, path in matches:
+           variable = ctk.BooleanVar(value=path in self.selected_apps)
+           ctk.CTkCheckBox(
+               self.application_rows,
+               text=name,
+               variable=variable,
+               command=lambda selected_path=path, selected_var=variable:
+                   self.toggle_application(selected_path, selected_var.get()),
+           ).pack(anchor="w", padx=8, pady=3)
+
+   def toggle_application(self, path: str, selected: bool):
+       if selected:
+           self.selected_apps.add(path)
+       else:
+           self.selected_apps.discard(path)
+
+   def add_website(self):
+       url = self.website_url.get()
+       try:
+           url = profiles.validate_website(url)
+       except ValueError as exc:
+           messagebox.showerror("Некорректный адрес сайта", str(exc), parent=self)
+           return
+       if any(website["url"] == url for website in self.websites):
+           messagebox.showerror(
+               "Сайт уже добавлен", "Этот адрес уже есть в профиле.", parent=self
+           )
+           return
+       name = self.website_name.get().strip() or url.split("//", 1)[-1].split("/", 1)[0]
+       self.websites.append({"name": name, "url": url})
+       self.website_name.delete(0, "end")
+       self.website_url.delete(0, "end")
+       self.render_websites()
+
+   def render_websites(self):
+       for widget in self.website_rows.winfo_children():
+           widget.destroy()
+       if not self.websites:
+           ctk.CTkLabel(
+               self.website_rows, text="Сайты ещё не добавлены.", text_color=MUTED
+           ).pack(anchor="w", pady=4)
+       for index, website in enumerate(self.websites):
+           row = ctk.CTkFrame(self.website_rows, fg_color="transparent")
+           row.pack(fill="x", pady=2)
+           ctk.CTkLabel(
+               row, text=f"{website['name']}  ·  {website['url']}", anchor="w"
+           ).pack(side="left", fill="x", expand=True)
+           ctk.CTkButton(
+               row,
+               text="Убрать",
+               width=72,
+               fg_color="#3a3a3a",
+               command=lambda selected=index: self.remove_website(selected),
+           ).pack(side="right")
+
+   def remove_website(self, index: int):
+       self.websites.pop(index)
+       self.render_websites()
+
+   def save(self):
+       selected = [
+           {"name": name.removesuffix(" — не найдено"), "path": path}
+           for name, path in self.applications
+           if path in self.selected_apps
+       ]
+       try:
+           profile = profiles.validate_profiles([{
+               "name": self.name_var.get(),
+               "apps": selected,
+               "websites": self.websites,
+           }])[0]
+       except (TypeError, ValueError) as exc:
+           messagebox.showerror("Не удалось сохранить профиль", str(exc), parent=self)
+           return
+       if self.on_save(profile):
+           self.destroy()
+
+
+class WorkProfilesWindow(ctk.CTkToplevel):
+   def __init__(self, parent):
+       super().__init__(parent)
+       self.parent = parent
+       self.title("Рабочие профили")
+       self.geometry("760x560")
+       self.minsize(620, 440)
+       self.transient(parent)
+       self.profiles = copy.deepcopy(parent.cfg["work_profiles"])
+
+       header = ctk.CTkFrame(self, fg_color="transparent")
+       header.pack(fill="x", padx=18, pady=(18, 8))
+       ctk.CTkLabel(
+           header, text="Рабочие профили", font=("", 22, "bold")
+       ).pack(side="left")
+       ctk.CTkButton(
+           header, text="＋ Новый профиль", command=lambda: self.edit_profile()
+       ).pack(side="right")
+       ctk.CTkLabel(
+           self,
+           text="Запускай нужные приложения и открывай сайты вместе одним нажатием.",
+           anchor="w",
+           text_color=MUTED,
+       ).pack(fill="x", padx=18, pady=(0, 10))
+       self.profile_rows = ctk.CTkScrollableFrame(self)
+       self.profile_rows.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+       self.render_profiles()
+
+   def render_profiles(self):
+       for widget in self.profile_rows.winfo_children():
+           widget.destroy()
+       if not self.profiles:
+           ctk.CTkLabel(
+               self.profile_rows,
+               text="Пока нет профилей. Создай профиль для своей рабочей задачи.",
+               text_color=MUTED,
+           ).pack(anchor="w", padx=12, pady=14)
+       for index, profile in enumerate(self.profiles):
+           row = ctk.CTkFrame(self.profile_rows)
+           row.pack(fill="x", padx=4, pady=5)
+           details = ctk.CTkFrame(row, fg_color="transparent")
+           details.pack(side="left", fill="x", expand=True, padx=12, pady=9)
+           ctk.CTkLabel(
+               details, text=profile["name"], font=("", 15, "bold"), anchor="w"
+           ).pack(anchor="w")
+           ctk.CTkLabel(
+               details,
+               text=f"{len(profile['apps'])} приложений · {len(profile['websites'])} сайтов",
+               text_color=MUTED,
+               anchor="w",
+           ).pack(anchor="w")
+           ctk.CTkButton(
+               row, text="Запустить", width=92,
+               command=lambda selected=index: self.launch(selected),
+           ).pack(side="left", padx=4, pady=10)
+           ctk.CTkButton(
+               row, text="Изменить", width=88, fg_color="#3a3a3a",
+               command=lambda selected=index: self.edit_profile(selected),
+           ).pack(side="left", padx=4, pady=10)
+           ctk.CTkButton(
+               row, text="Удалить", width=76, fg_color="#8f3434",
+               hover_color="#742828",
+               command=lambda selected=index: self.delete_profile(selected),
+           ).pack(side="left", padx=(4, 10), pady=10)
+
+   def edit_profile(self, index: int | None = None):
+       try:
+           installed = sorted(
+               (
+                   (apps.get_app_name(path), str(path.resolve()))
+                   for path in apps.scan_applications()
+               ),
+               key=lambda application: application[0].casefold(),
+           )
+       except (OSError, ValueError, RuntimeError) as exc:
+           messagebox.showerror(
+               "Не удалось найти приложения", str(exc), parent=self
+           )
+           return
+       existing = self.profiles[index] if index is not None else None
+       WorkProfileEditor(
+           self,
+           existing,
+           installed,
+           lambda profile: self.save_profile(profile, index),
+       )
+
+   def save_profile(self, profile: dict, index: int | None) -> bool:
+       updated = copy.deepcopy(self.profiles)
+       if index is None:
+           updated.append(profile)
+       else:
+           updated[index] = profile
+       try:
+           updated = profiles.validate_profiles(updated)
+           utils.save_json(
+               config.CONFIG_PATH,
+               {**self.parent.cfg, "work_profiles": updated},
+           )
+       except (OSError, TypeError, ValueError) as exc:
+           messagebox.showerror(
+               "Не удалось сохранить профиль", str(exc), parent=self
+           )
+           return False
+       self.profiles = updated
+       self.parent.cfg["work_profiles"] = updated
+       self.render_profiles()
+       return True
+
+   def delete_profile(self, index: int):
+       profile = self.profiles[index]
+       if not messagebox.askyesno(
+           "Удалить профиль",
+           f"Удалить профиль «{profile['name']}»?",
+           parent=self,
+       ):
+           return
+       updated = self.profiles[:index] + self.profiles[index + 1:]
+       try:
+           utils.save_json(
+               config.CONFIG_PATH,
+               {**self.parent.cfg, "work_profiles": updated},
+           )
+       except (OSError, TypeError, ValueError) as exc:
+           messagebox.showerror(
+               "Не удалось удалить профиль", str(exc), parent=self
+           )
+           return
+       self.profiles = updated
+       self.parent.cfg["work_profiles"] = updated
+       self.render_profiles()
+
+   def launch(self, index: int):
+       profile = self.profiles[index]
+       if not profile["apps"] and not profile["websites"]:
+           messagebox.showinfo(
+               "Пустой профиль",
+               "Добавь в профиль хотя бы одно приложение или сайт.",
+               parent=self,
+           )
+           return
+       try:
+           errors = profiles.launch_profile(profile)
+       except (TypeError, ValueError) as exc:
+           messagebox.showerror("Не удалось запустить профиль", str(exc), parent=self)
+           return
+       if errors:
+           messagebox.showwarning(
+               "Профиль запущен не полностью",
+               "Не удалось открыть некоторые элементы:\n\n" + "\n".join(errors),
+               parent=self,
+           )
+
+
 class Main(ctk.CTk):
     def __init__(self, cfg: dict, history: list[dict]):
         super().__init__()
@@ -1403,6 +1730,10 @@ class Main(ctk.CTk):
             lambda: SettingsWindow(self, self.cfg, self.settings_saved),
         )
         self._add_nav(sidebar, "apps", "▣  Приложения", self.edit_app_assignments)
+        self._add_nav(
+            sidebar, "profiles", "◉  Рабочие профили",
+            lambda: WorkProfilesWindow(self),
+        )
         self._add_nav(sidebar, "help", "?  Справка", self.show_help)
         self._set_active_nav("scan")
 
