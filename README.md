@@ -177,7 +177,11 @@ desktop-keeper/
 - Configuration files are user-editable and never sent anywhere
 
 ## Contributing
-This is an early-stage project. Issues and pull requests are welcome!
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for development and review guidance, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+for community expectations. Please report security vulnerabilities using
+[SECURITY.md](SECURITY.md), not a public issue. Accessibility barriers can be
+reported as described in [ACCESSIBILITY.md](ACCESSIBILITY.md).
 
 ## License
 MIT License - see [LICENSE](LICENSE) file for details.

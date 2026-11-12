@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Accessibility guidance
+    url: https://github.com/sap112233/Clear_My_PC/blob/main/ACCESSIBILITY.md
+    about: Read how to report and discuss accessibility barriers.
+  - name: Security policy
+    url: https://github.com/sap112233/Clear_My_PC/blob/main/SECURITY.md
+    about: Report security vulnerabilities privately; do not post them publicly.
