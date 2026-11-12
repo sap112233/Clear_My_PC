@@ -8,15 +8,17 @@ import work_profiles
 
 class WorkProfileTests(unittest.TestCase):
     def test_validate_profiles_keeps_apps_and_http_websites(self):
-        profile = {
-            "name": "Дизайн",
-            "apps": [{"name": "Figma", "path": "/Applications/Figma.app"}],
-            "websites": [
-                {"name": "Pinterest", "url": "https://pinterest.com/"}
-            ],
-        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app_path = str(Path(temp_dir) / "Applications" / "Figma.app")
+            profile = {
+                "name": "Дизайн",
+                "apps": [{"name": "Figma", "path": app_path}],
+                "websites": [
+                    {"name": "Pinterest", "url": "https://pinterest.com/"}
+                ],
+            }
 
-        self.assertEqual(work_profiles.validate_profiles([profile]), [profile])
+            self.assertEqual(work_profiles.validate_profiles([profile]), [profile])
 
     def test_validate_profiles_rejects_duplicate_names_and_non_web_urls(self):
         with self.assertRaisesRegex(ValueError, "уже существует"):
@@ -59,24 +61,27 @@ class WorkProfileTests(unittest.TestCase):
             open_url.assert_called_once_with("https://pinterest.com/", new=2)
 
     def test_launch_profile_reports_missing_or_untrusted_app_and_keeps_going(self):
-        profile = {
-            "name": "Работа",
-            "apps": [
-                {"name": "Missing", "path": "/Applications/Missing.app"},
-                {"name": "Outside", "path": "/tmp/Outside.app"},
-            ],
-            "websites": [{"name": "Site", "url": "https://example.com"}],
-        }
-        with (
-            mock.patch.object(
-                work_profiles.pt, "app_dirs", return_value=[Path("/Applications")]
-            ),
-            mock.patch.object(work_profiles.pt, "IS_MAC", True),
-            mock.patch.object(work_profiles.pt, "IS_WIN", False),
-            mock.patch.object(work_profiles.pt, "IS_LINUX", False),
-            mock.patch.object(work_profiles.webbrowser, "open", return_value=True) as open_url,
-        ):
-            errors = work_profiles.launch_profile(profile)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "Applications"
+            profile = {
+                "name": "Работа",
+                "apps": [
+                    {"name": "Missing", "path": str(root / "Missing.app")},
+                    {
+                        "name": "Outside",
+                        "path": str(Path(temp_dir) / "Outside.app"),
+                    },
+                ],
+                "websites": [{"name": "Site", "url": "https://example.com"}],
+            }
+            with (
+                mock.patch.object(work_profiles.pt, "app_dirs", return_value=[root]),
+                mock.patch.object(work_profiles.pt, "IS_MAC", True),
+                mock.patch.object(work_profiles.pt, "IS_WIN", False),
+                mock.patch.object(work_profiles.pt, "IS_LINUX", False),
+                mock.patch.object(work_profiles.webbrowser, "open", return_value=True) as open_url,
+            ):
+                errors = work_profiles.launch_profile(profile)
 
         self.assertEqual(len(errors), 2)
         self.assertIn("Missing", errors[0])
