@@ -46,12 +46,16 @@ class WorkProfileTests(unittest.TestCase):
             work_profiles.validate_profiles(
                 [{}] * (work_profiles.MAX_PROFILES + 1)
             )
-        with self.assertRaisesRegex(ValueError, "ровно 2"):
-            work_profiles.validate_profiles([{
-                "name": "Дизайн",
-                "apps": [{"name": "Editor", "path": "/Applications/Editor.app"}],
-                "layout": "half",
-            }])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "ровно 2"):
+                work_profiles.validate_profiles([{
+                    "name": "Дизайн",
+                    "apps": [{
+                        "name": "Editor",
+                        "path": str(Path(temp_dir) / "Applications" / "Editor.app"),
+                    }],
+                    "layout": "half",
+                }])
         with self.assertRaisesRegex(ValueError, "неизвестный"):
             work_profiles.validate_profiles([{
                 "name": "Дизайн",
