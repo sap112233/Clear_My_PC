@@ -31,6 +31,7 @@ import platform_tools as pt
 import screenshot_handler as shots
 import updater
 import utils
+import window_layout
 import work_profiles as profiles
 
 logger = logging.getLogger(__name__)
@@ -1375,7 +1376,7 @@ class WorkProfileEditor(ctk.CTkToplevel):
        super().__init__(parent)
        self.on_save = on_save
        self.title("Рабочий профиль")
-       self.geometry("760x700")
+       self.geometry("760x720")
        self.minsize(620, 560)
        self.transient(parent)
        self.grab_set()
@@ -1392,6 +1393,19 @@ class WorkProfileEditor(ctk.CTkToplevel):
                    (f"{application['name']} — не найдено", application["path"])
                )
        self.websites = copy.deepcopy((profile or {}).get("websites", []))
+       self.layout_options = {
+           "Не менять окна": "none",
+           "Пополам — 2 окна": "half",
+           "Фокус — 1/3 + 2/3": "focus",
+           "Четыре окна — 2×2": "grid",
+       }
+       current_layout = (profile or {}).get("layout", "none")
+       current_layout_label = next(
+           label
+           for label, value in self.layout_options.items()
+           if value == current_layout
+       )
+       self.layout_var = ctk.StringVar(value=current_layout_label)
 
        ctk.CTkLabel(
            self, text="Название профиля", font=("", 14, "bold")
@@ -1408,9 +1422,18 @@ class WorkProfileEditor(ctk.CTkToplevel):
        )
        self.app_search.pack(fill="x", padx=16, pady=(0, 6))
        self.app_search.bind("<KeyRelease>", lambda _event: self.render_applications())
-       self.application_rows = ctk.CTkScrollableFrame(self, height=210)
+       self.application_rows = ctk.CTkScrollableFrame(self, height=180)
        self.application_rows.pack(fill="both", expand=True, padx=16)
        self.render_applications()
+
+       ctk.CTkLabel(
+           self, text="Расположение окон приложений", font=("", 14, "bold")
+       ).pack(anchor="w", padx=16, pady=(12, 4))
+       ctk.CTkOptionMenu(
+           self,
+           values=list(self.layout_options),
+           variable=self.layout_var,
+       ).pack(fill="x", padx=16)
 
        ctk.CTkLabel(
            self, text="Сайты", font=("", 14, "bold")
@@ -1527,6 +1550,7 @@ class WorkProfileEditor(ctk.CTkToplevel):
                "name": self.name_var.get(),
                "apps": selected,
                "websites": self.websites,
+               "layout": self.layout_options[self.layout_var.get()],
            }])[0]
        except (TypeError, ValueError) as exc:
            messagebox.showerror("Не удалось сохранить профиль", str(exc), parent=self)
@@ -1676,15 +1700,40 @@ class WorkProfilesWindow(ctk.CTkToplevel):
                parent=self,
            )
            return
-       try:
-           errors = profiles.launch_profile(profile)
-       except (TypeError, ValueError) as exc:
-           messagebox.showerror("Не удалось запустить профиль", str(exc), parent=self)
+       screen_size = (
+           self.parent.winfo_screenwidth(),
+           self.parent.winfo_screenheight(),
+       )
+       result = []
+
+       def launch_items():
+           try:
+               errors = profiles.launch_profile(profile)
+               if profile.get("layout", "none") != "none":
+                   errors.extend(window_layout.arrange_profile(profile, screen_size))
+               result.append(errors)
+           except (
+               OSError,
+               RuntimeError,
+               subprocess.SubprocessError,
+               TypeError,
+               ValueError,
+           ) as exc:
+               result.append([str(exc)])
+
+       worker = threading.Thread(target=launch_items, daemon=True)
+       worker.start()
+       self.after(100, self.report_launch_result, worker, result)
+
+   def report_launch_result(self, worker, result: list[list[str]]):
+       if worker.is_alive():
+           self.after(100, self.report_launch_result, worker, result)
            return
-       if errors:
+       if result and result[0]:
            messagebox.showwarning(
                "Профиль запущен не полностью",
-               "Не удалось открыть некоторые элементы:\n\n" + "\n".join(errors),
+               "Не удалось открыть или расположить некоторые элементы:\n\n"
+               + "\n".join(result[0]),
                parent=self,
            )
 

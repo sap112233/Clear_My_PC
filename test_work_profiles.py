@@ -16,6 +16,7 @@ class WorkProfileTests(unittest.TestCase):
                 "websites": [
                     {"name": "Pinterest", "url": "https://pinterest.com/"}
                 ],
+                "layout": "none",
             }
 
             self.assertEqual(work_profiles.validate_profiles([profile]), [profile])
@@ -33,6 +34,29 @@ class WorkProfileTests(unittest.TestCase):
             }])
         with self.assertRaisesRegex(ValueError, "http://"):
             work_profiles.validate_website("https://user:pass@example.com")
+
+    def test_validate_website_rejects_url_confusion_and_oversized_input(self):
+        with self.assertRaisesRegex(ValueError, "http://"):
+            work_profiles.validate_website("https://example.com\\@attacker.test")
+        with self.assertRaisesRegex(ValueError, "2048"):
+            work_profiles.validate_website("https://example.com/" + "a" * 2048)
+
+    def test_validate_profiles_bounds_saved_data_and_checks_layout_count(self):
+        with self.assertRaisesRegex(ValueError, "не более"):
+            work_profiles.validate_profiles(
+                [{}] * (work_profiles.MAX_PROFILES + 1)
+            )
+        with self.assertRaisesRegex(ValueError, "ровно 2"):
+            work_profiles.validate_profiles([{
+                "name": "Дизайн",
+                "apps": [{"name": "Editor", "path": "/Applications/Editor.app"}],
+                "layout": "half",
+            }])
+        with self.assertRaisesRegex(ValueError, "неизвестный"):
+            work_profiles.validate_profiles([{
+                "name": "Дизайн",
+                "layout": [],
+            }])
 
     def test_launch_profile_opens_selected_apps_and_websites(self):
         with tempfile.TemporaryDirectory() as temp_dir:

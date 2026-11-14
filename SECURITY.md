@@ -6,7 +6,7 @@ Security fixes are intended for the latest stable release line.
 
 | Version | Security updates |
 | --- | --- |
-| Latest stable release (currently 1.4.2) | Yes |
+| Latest stable release (currently 1.4.3) | Yes |
 | Older releases | Not guaranteed |
 
 Use the latest release when possible. The supported version may change as new

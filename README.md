@@ -39,6 +39,8 @@ Automatic desktop organizer for macOS and Windows, with initial Linux support.
 ### 🧰 Work Profiles
 - Create named profiles containing installed applications and websites
 - Start a profile with one click to launch its apps and open its links in your default browser
+- Optionally arrange the profile's app windows side by side, in a 1/3 + 2/3 split, or in a 2×2 grid
+- Window arrangement affects only matched profile apps; macOS may require Accessibility permission, and Linux requires X11 with `wmctrl`
 - Profiles are saved locally and can be edited or deleted at any time
 
 ### 🗑️ Automatic Cleanup
@@ -92,7 +94,7 @@ Installer auto-archiving is disabled by default. Choose a delay in Settings; aft
 - **Monitoring**: Preview and approve each new screenshot before it is moved
 - **Autostart**: Launch DesktopKeeper on system boot
 - **Folders and Types**: Select destinations, enable file groups, and define custom extension rules
-- **Work Profiles**: Create or edit profiles, choose installed apps, add `http://` or `https://` websites, and launch the selected set together
+- **Work Profiles**: Create or edit profiles, choose installed apps, add `http://` or `https://` websites, optionally choose a window layout, and launch the selected set together. Unsupported window control or missing permissions are reported without preventing the profile from launching.
 
 ### Categories
 - Add custom categories for applications

@@ -9,22 +9,37 @@ from urllib.parse import urlsplit
 
 import platform_tools as pt
 
+MAX_PROFILES = 50
+MAX_PROFILE_APPS = 20
+MAX_PROFILE_WEBSITES = 20
+MAX_PROFILE_NAME_LENGTH = 80
+MAX_ITEM_NAME_LENGTH = 120
+MAX_APP_PATH_LENGTH = 4096
+MAX_WEBSITE_URL_LENGTH = 2048
+LAYOUT_APP_COUNTS = {"none": 0, "half": 2, "focus": 2, "grid": 4}
+
 
 def validate_website(url: str) -> str:
     if not isinstance(url, str):
         raise ValueError("Адрес сайта должен быть строкой.")
     url = url.strip()
+    if not url or len(url) > MAX_WEBSITE_URL_LENGTH:
+        raise ValueError("Адрес сайта должен содержать не более 2048 символов.")
     try:
         parsed = urlsplit(url)
         hostname = parsed.hostname
         parsed.port
     except ValueError as exc:
-        raise ValueError(f"Некорректный адрес сайта: {url}") from exc
+        raise ValueError("Некорректный адрес сайта.") from exc
     if (
-        any(character.isspace() or ord(character) < 32 for character in url)
+        any(
+            character.isspace() or ord(character) < 32 or ord(character) == 127
+            for character in url
+        )
         or parsed.scheme.lower() not in {"http", "https"}
         or not parsed.netloc
         or not hostname
+        or "\\" in parsed.netloc
         or parsed.username is not None
         or parsed.password is not None
     ):
@@ -35,6 +50,8 @@ def validate_website(url: str) -> str:
 def validate_profiles(profiles: object) -> list[dict]:
     if not isinstance(profiles, list):
         raise ValueError("Рабочие профили должны быть списком.")
+    if len(profiles) > MAX_PROFILES:
+        raise ValueError(f"Можно сохранить не более {MAX_PROFILES} рабочих профилей.")
     result = []
     names = set()
     for profile in profiles:
@@ -43,7 +60,12 @@ def validate_profiles(profiles: object) -> list[dict]:
         name = profile.get("name")
         applications = profile.get("apps", [])
         websites = profile.get("websites", [])
-        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name.strip()) > MAX_PROFILE_NAME_LENGTH
+            or _contains_control(name)
+        ):
             raise ValueError("Название профиля должно содержать от 1 до 80 символов.")
         name = name.strip()
         if name.casefold() in names:
@@ -51,6 +73,19 @@ def validate_profiles(profiles: object) -> list[dict]:
         names.add(name.casefold())
         if not isinstance(applications, list) or not isinstance(websites, list):
             raise ValueError(f"Приложения и сайты профиля «{name}» должны быть списками.")
+        if len(applications) > MAX_PROFILE_APPS:
+            raise ValueError(
+                f"В профиле «{name}» можно сохранить не более "
+                f"{MAX_PROFILE_APPS} приложений."
+            )
+        if len(websites) > MAX_PROFILE_WEBSITES:
+            raise ValueError(
+                f"В профиле «{name}» можно сохранить не более "
+                f"{MAX_PROFILE_WEBSITES} сайтов."
+            )
+        layout = profile.get("layout", "none")
+        if not isinstance(layout, str) or layout not in LAYOUT_APP_COUNTS:
+            raise ValueError("Выбран неизвестный вариант раскладки окон.")
 
         checked_apps = []
         seen_apps = set()
@@ -61,7 +96,11 @@ def validate_profiles(profiles: object) -> list[dict]:
             if (
                 not isinstance(app_name, str)
                 or not app_name.strip()
+                or len(app_name.strip()) > MAX_ITEM_NAME_LENGTH
+                or _contains_control(app_name)
                 or not isinstance(app_path, str)
+                or len(app_path) > MAX_APP_PATH_LENGTH
+                or _contains_control(app_path)
                 or not Path(app_path).is_absolute()
             ):
                 raise ValueError(f"Приложение профиля «{name}» имеет неверный путь или имя.")
@@ -76,8 +115,16 @@ def validate_profiles(profiles: object) -> list[dict]:
             if not isinstance(website, dict):
                 raise ValueError(f"Сайт профиля «{name}» имеет неверный формат.")
             website_name, url = website.get("name"), website.get("url")
-            if not isinstance(website_name, str) or not website_name.strip():
-                raise ValueError(f"Сайт профиля «{name}» должен иметь название.")
+            if (
+                not isinstance(website_name, str)
+                or not website_name.strip()
+                or len(website_name.strip()) > MAX_ITEM_NAME_LENGTH
+                or _contains_control(website_name)
+            ):
+                raise ValueError(
+                    f"Название сайта в профиле «{name}» должно содержать "
+                    f"от 1 до {MAX_ITEM_NAME_LENGTH} символов."
+                )
             url = validate_website(url)
             if url not in seen_urls:
                 checked_websites.append(
@@ -85,10 +132,24 @@ def validate_profiles(profiles: object) -> list[dict]:
                 )
                 seen_urls.add(url)
 
+        expected_apps = LAYOUT_APP_COUNTS[layout]
+        if expected_apps and len(checked_apps) != expected_apps:
+            raise ValueError(
+                f"Для выбранной раскладки нужно выбрать ровно {expected_apps} приложения."
+            )
         result.append(
-            {"name": name, "apps": checked_apps, "websites": checked_websites}
+            {
+                "name": name,
+                "apps": checked_apps,
+                "websites": checked_websites,
+                "layout": layout,
+            }
         )
     return result
+
+
+def _contains_control(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 def _installed_application(path: Path) -> Path:
